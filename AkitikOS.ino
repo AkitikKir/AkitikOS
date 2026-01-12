@@ -15,7 +15,16 @@
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 
-struct Theme;
+struct Theme {
+  uint16_t bg;
+  uint16_t bg2;
+  uint16_t fg;
+  uint16_t accent;
+  uint16_t panel;
+  uint16_t prompt;
+  uint16_t shadow;
+  uint16_t dim;
+};
 
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
@@ -170,17 +179,6 @@ static uint32_t diagFullRedraws = 0;
 static uint32_t diagGradientRedraws = 0;
 static uint32_t diagLastLogMs = 0;
 #endif
-
-struct Theme {
-  uint16_t bg;
-  uint16_t bg2;
-  uint16_t fg;
-  uint16_t accent;
-  uint16_t panel;
-  uint16_t prompt;
-  uint16_t shadow;
-  uint16_t dim;
-};
 
 static const Theme THEMES[] = {
   {0x0000, 0x0841, 0xFFFF, 0xFD20, 0x2104, 0xFFE0, 0x0000, 0x7BEF},
