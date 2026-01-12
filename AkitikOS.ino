@@ -453,7 +453,7 @@ void aiSendChat(const String &prompt) {
   }
 
   WiFiClientSecure client;
-  client.setInsecure();
+  client.setCACert(nullptr);
   HTTPClient http;
   if (!http.begin(client, "https://api.aiza-ai.ru/v1/chat/completions")) {
     tftPrintLn("AI: request failed");
