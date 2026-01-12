@@ -70,8 +70,8 @@ struct ssh_key_struct {
     uint8_t *ed25519_privkey;
 #endif /* HAVE_LIBGCRYPT */
 #ifndef HAVE_LIBCRYPTO
-    ed25519_pubkey *ed25519_pubkey;
-    ed25519_privkey *ed25519_privkey;
+    ed25519_pubkey *ed25519_pubkey_ptr;
+    ed25519_privkey *ed25519_privkey_ptr;
 #endif /* HAVE_LIBCRYPTO */
     ssh_string sk_application;
     ssh_buffer cert;
