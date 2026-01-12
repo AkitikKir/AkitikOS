@@ -1,0 +1,37 @@
+name: Compile M5Cardputer Sketch
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Platform
+        run: |
+          arduino-cli core update-index --additional-urls static-cdn.m5stack.com
+          arduino-cli core install esp32:esp32 --additional-urls static-cdn.m5stack.com
+
+      - name: Install Libraries
+        run: |
+          arduino-cli lib install "M5Cardputer"
+          arduino-cli lib install "M5Unified"
+          arduino-cli lib install "M5GFX"
+
+      - name: Compile Sketch
+        run: |
+          # Замените CardPC/CardPC.ino на ваш путь к файлу
+          arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build CardPC/CardPC.ino
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5cardputer-firmware
+          path: ./build/*.bin
+          
