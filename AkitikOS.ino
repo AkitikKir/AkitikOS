@@ -2,6 +2,8 @@
   AkitikOS
 */
 
+enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
+
 #include <Arduino.h>
 #include "Theme.h"
 #include <SPI.h>
@@ -104,7 +106,6 @@ bool aiLoading = false;
 enum AiUiState { AI_MODELS, AI_CHAT };
 AiUiState aiUiState = AI_MODELS;
 
-enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 SshState sshState = SSH_IDLE;
 String sshHost;
 String sshUser;
