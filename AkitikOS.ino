@@ -3,6 +3,7 @@
 */
 
 #include <Arduino.h>
+#include "Theme.h"
 #include <SPI.h>
 #include <SD.h>
 #include <WiFi.h>
@@ -14,17 +15,6 @@
 #define HAS_SSH 1
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
-
-struct Theme {
-  uint16_t bg;
-  uint16_t bg2;
-  uint16_t fg;
-  uint16_t accent;
-  uint16_t panel;
-  uint16_t prompt;
-  uint16_t shadow;
-  uint16_t dim;
-};
 
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
