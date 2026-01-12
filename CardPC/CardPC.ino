@@ -440,6 +440,9 @@ bool aiFetchModels() {
     aiErrorUntil = millis() + 2000;
     return false;
   }
+  http.setTimeout(8000);
+  http.addHeader("Accept", "application/json");
+  http.addHeader("Accept-Encoding", "identity");
   http.addHeader("Authorization", "Bearer " + aiApiKey);
   int code = http.GET();
   if (code != 200) {
@@ -447,21 +450,71 @@ bool aiFetchModels() {
     aiErrorUntil = millis() + 2000;
     return false;
   }
-  String body = http.getString();
-  http.end();
 
-  int idx = 0;
-  while (aiModelCount < 8) {
-    int pos = body.indexOf("\"id\"", idx);
-    if (pos < 0) break;
-    int colon = body.indexOf(':', pos);
-    int quote1 = body.indexOf('"', colon + 1);
-    int quote2 = body.indexOf('"', quote1 + 1);
-    if (colon < 0 || quote1 < 0 || quote2 < 0) break;
-    String id = body.substring(quote1 + 1, quote2);
-    aiModels[aiModelCount++] = id;
-    idx = quote2 + 1;
+  WiFiClient *stream = http.getStreamPtr();
+  const uint32_t deadline = millis() + 8000;
+  const char key[] = "\"id\"";
+  while (aiModelCount < 8 && millis() < deadline && (stream->connected() || stream->available())) {
+    int keyPos = 0;
+    bool found = false;
+    String id;
+    while (millis() < deadline && (stream->connected() || stream->available())) {
+      if (!stream->available()) {
+        delay(2);
+        continue;
+      }
+      char c = (char)stream->read();
+      if (!found) {
+        if (c == key[keyPos]) {
+          keyPos++;
+          if (keyPos == 4) {
+            found = true;
+            keyPos = 0;
+          }
+        } else {
+          keyPos = (c == key[0]) ? 1 : 0;
+        }
+        continue;
+      }
+      if (c != ':') {
+        continue;
+      }
+      // wait for opening quote of the value
+      while (millis() < deadline && (stream->connected() || stream->available())) {
+        if (!stream->available()) {
+          delay(2);
+          continue;
+        }
+        c = (char)stream->read();
+        if (c == '"') break;
+      }
+      // read value with basic escape handling
+      while (millis() < deadline && (stream->connected() || stream->available())) {
+        if (!stream->available()) {
+          delay(2);
+          continue;
+        }
+        c = (char)stream->read();
+        if (c == '\\') {
+          if (stream->available()) {
+            id += (char)stream->read();
+          }
+          continue;
+        }
+        if (c == '"') {
+          break;
+        }
+        if (id.length() < 96) id += c;
+      }
+      break;
+    }
+    if (id.length()) {
+      aiModels[aiModelCount++] = id;
+    } else {
+      break;
+    }
   }
+  http.end();
   if (aiModelCount == 0) {
     aiErrorUntil = millis() + 2000;
     return false;
