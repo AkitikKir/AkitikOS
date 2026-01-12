@@ -2081,8 +2081,10 @@ void handleKeyboardSsh() {
       int port = sshUiPort.toInt();
       if (port <= 0) port = 22;
       sshPort = port;
+#if HAS_SSH
       sshUseSavedPassword = sshUiPass.length() > 0;
       sshSavedPassword = sshUiPass;
+#endif
       cmdSsh(sshUiUser + "@" + sshUiHost);
       currentApp = APP_TERMINAL;
       uiDirty = true;
