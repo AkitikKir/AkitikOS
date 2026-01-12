@@ -13,23 +13,30 @@ jobs:
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
         with:
-          # Оставляем пустым, чтобы не лезла ошибка "unsupported protocol"
-          additional-urls: "" 
+          # Remove the empty string or don't set this at all
+          # Let it default or set it properly in next steps
 
-      - name: Install ESP32 Platform
+      - name: Clean Arduino directory
         run: |
-          # 1. Полностью сносим папку настроек, где застрял битый URL
+          # Clean up any previous configs
           rm -rf /home/runner/.arduino15
-          
-          # 2. Явно инициализируем конфиг с ПРАВИЛЬНЫМ URL
+
+      - name: Install ESP32 Platform with M5Stack
+        run: |
+          # Initialize Arduino CLI config
           arduino-cli config init
-          arduino-cli config set board_manager.additional_urls static-cdn.m5stack.com
           
-          # 3. Обновляем индексы (теперь только из конфига)
+          # Add M5Stack package index URL
+          arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/package_m5stack_index.json
+          
+          # Update core index including M5Stack
           arduino-cli core update-index
           
-          # 4. Устанавливаем ядро
+          # Install ESP32 platform from Arduino
           arduino-cli core install esp32:esp32
+          
+          # List available platforms to verify M5Stack is included
+          arduino-cli core list
 
       - name: Install Libraries
         run: |
@@ -40,7 +47,11 @@ jobs:
       - name: Compile Sketch
         run: |
           mkdir -p ./build
-          # Компиляция папки CardPC
+          # Verify board is available
+          arduino-cli core search m5stack
+          arduino-cli board listall | grep cardputer
+          
+          # Compile the sketch
           arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
 
       - name: Upload Binary
@@ -48,4 +59,3 @@ jobs:
         with:
           name: m5cardputer-firmware
           path: ./build/*.bin
-          
