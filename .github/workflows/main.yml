@@ -41,7 +41,7 @@ jobs:
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
           # Add LibSSH-ESP32 library
-          arduino-cli lib install "LibSSH-ESP32"
+          arduino-cli lib install "LibSSH-ESP32" || echo "LibSSH-ESP32 not available; SSH features will be disabled"
 
       - name: Check Available Partition Schemes
         run: |

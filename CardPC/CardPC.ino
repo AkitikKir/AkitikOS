@@ -11,10 +11,17 @@
 #include <M5Cardputer.h>
 #include <time.h>
 #include <lgfx/v1/lgfx_fonts.hpp>
-#define HAS_SSH 1
-#include <libssh_esp32.h>
-#include <libssh/libssh.h>
-#include <M5Cardputer.h>
+#if defined(__has_include)
+  #if __has_include(<libssh_esp32.h>)
+    #define HAS_SSH 1
+    #include <libssh_esp32.h>
+    #include <libssh/libssh.h>
+  #else
+    #define HAS_SSH 0
+  #endif
+#else
+  #define HAS_SSH 0
+#endif
 #include <M5Unified.h> // Добавьте это явно, если его нет
 
 // Опционально: ESP32Time (если доступна в окружении)
