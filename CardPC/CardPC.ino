@@ -1846,7 +1846,7 @@ void handleCommand(const String &line) {
     int lines = 10;
     if (sp > 0) {
       path = rest.substring(0, sp);
-      lines = max(1, rest.substring(sp + 1).toInt());
+      lines = max(1, (int)rest.substring(sp + 1).toInt());
     }
     return cmdHead(path, lines);
   }
@@ -1858,7 +1858,7 @@ void handleCommand(const String &line) {
     int lines = 10;
     if (sp > 0) {
       path = rest.substring(0, sp);
-      lines = max(1, rest.substring(sp + 1).toInt());
+      lines = max(1, (int)rest.substring(sp + 1).toInt());
     }
     return cmdTail(path, lines);
   }
