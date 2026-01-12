@@ -17,20 +17,6 @@
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 
-template <typename T>
-static auto setInsecureCompat(T &client, int) -> decltype(client.setInsecure(), void()) {
-  client.setInsecure();
-}
-
-template <typename T>
-static void setInsecureCompat(T &client, long) {
-  client.setCACert(nullptr);
-}
-
-static void setInsecureCompat(WiFiClientSecure &client) {
-  setInsecureCompat(client, 0);
-}
-
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
 
@@ -415,7 +401,7 @@ bool aiFetchModels() {
   }
 
   WiFiClientSecure client;
-  setInsecureCompat(client);
+  client.setCACert(nullptr);
   HTTPClient http;
   if (!http.begin(client, "https://api.aiza-ai.ru/v1/models")) {
     aiErrorUntil = millis() + 2000;
