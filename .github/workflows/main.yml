@@ -15,31 +15,31 @@ jobs:
 
       - name: Install ESP32 Platform
         run: |
-          # 1. Добавляем URL в конфигурацию (с https://)
-          arduino-cli config init
-          arduino-cli config add board_manager.additional_urls static-cdn.m5stack.com
+          # Удаляем старый конфиг, если он был кривой
+          rm -f /home/runner/.arduino15/arduino-cli.yaml
           
-          # 2. Обновляем индексы
-          arduino-cli core update-index
+          # Переменная с правильным URL
+          M5_URL="static-cdn.m5stack.com"
           
-          # 3. Устанавливаем ядро (M5Stack базируется на esp32)
-          arduino-cli core install esp32:esp32
+          # Обновляем индекс плат
+          arduino-cli core update-index --additional-urls $M5_URL
+          
+          # Устанавливаем платформу esp32
+          arduino-cli core install esp32:esp32 --additional-urls $M5_URL
 
       - name: Install Libraries
         run: |
-          # Установка необходимых библиотек
+          # Установка библиотек для Cardputer
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
 
       - name: Compile Sketch
         run: |
-          # Создаем папку для билда
           mkdir -p ./build
-          
-          # Компиляция. Убедитесь, что CardPC.ino лежит в папке CardPC/
-          # FQBN для Cardputer в актуальном ядре: esp32:esp32:m5stack_cardputer
-          arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build CardPC/
+          # Убедитесь, что ваш .ino файл лежит в папке CardPC (CardPC/CardPC.ino)
+          # Используем FQBN для Cardputer
+          arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
 
       - name: Upload Binary
         uses: actions/upload-artifact@v4
