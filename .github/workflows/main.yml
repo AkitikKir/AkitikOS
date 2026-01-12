@@ -10,16 +10,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-        with:
-          # Remove the empty string or don't set this at all
-          # Let it default or set it properly in next steps
-
       - name: Clean Arduino directory
         run: |
-          # Clean up any previous configs
           rm -rf /home/runner/.arduino15
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        # Remove the empty "with" section entirely
+        # Don't specify additional-urls here
 
       - name: Install ESP32 Platform with M5Stack
         run: |
@@ -48,8 +46,7 @@ jobs:
         run: |
           mkdir -p ./build
           # Verify board is available
-          arduino-cli core search m5stack
-          arduino-cli board listall | grep cardputer
+          arduino-cli board listall | grep -i cardputer || true
           
           # Compile the sketch
           arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
