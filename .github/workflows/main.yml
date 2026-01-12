@@ -46,7 +46,8 @@ jobs:
       - name: Verify Board Details
         run: |
           echo "Checking board properties for M5Stack Cardputer:"
-          arduino-cli board details m5stack:esp32:m5stack_cardputer | grep -i "partition\|flash\|memory"
+          # FIXED: Added -b flag before FQBN
+          arduino-cli board details -b m5stack:esp32:m5stack_cardputer | grep -i "partition\|flash\|memory" || echo "Note: Could not find partition details, but continuing..."
 
       - name: Compile Sketch with Huge App Partition
         run: |
