@@ -1,0 +1,71 @@
+name: Compile M5Cardputer Sketch
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Clean Arduino directory
+        run: |
+          rm -rf /home/runner/.arduino15
+
+      - name: Setup Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 Platform with M5Stack
+        run: |
+          # Initialize Arduino CLI config
+          arduino-cli config init
+          
+          # Add correct M5Stack package index URL
+          arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+          
+          # Also add alternative URL as backup
+          arduino-cli config add board_manager.additional_urls https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json
+          
+          # Update core index including M5Stack
+          arduino-cli core update-index
+          
+          # Install M5Stack core for ESP32
+          arduino-cli core install M5Stack:esp32
+          
+          # Verify installation
+          echo "Installed cores:"
+          arduino-cli core list
+
+      - name: Install Libraries
+        run: |
+          arduino-cli lib install "M5Cardputer"
+          arduino-cli lib install "M5Unified"
+          arduino-cli lib install "M5GFX"
+
+      - name: Verify Board Availability
+        run: |
+          echo "Available boards:"
+          arduino-cli board listall | grep -i cardputer || echo "Searching for Cardputer..."
+          # Alternative check
+          arduino-cli core list | grep -i m5stack
+
+      - name: Compile Sketch
+        run: |
+          mkdir -p ./build
+          
+          # Try with correct FQBN for M5Stack Cardputer
+          # The FQBN format is: m5stack:esp32:m5stack_cardputer
+          arduino-cli compile --fqbn m5stack:esp32:m5stack_cardputer --output-dir ./build ./CardPC
+          
+          # If above fails, try alternative FQBN
+          # arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
+          
+          echo "Build completed successfully!"
+
+      - name: Upload Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: m5cardputer-firmware
+          path: ./build/*.bin
