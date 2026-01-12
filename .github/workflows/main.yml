@@ -22,11 +22,8 @@ jobs:
           # Initialize Arduino CLI config
           arduino-cli config init
           
-          # Add correct M5Stack package index URL
+          # Add correct M5Stack package index URL (fixed 404 error)
           arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
-          
-          # Also add alternative URL as backup
-          arduino-cli config add board_manager.additional_urls https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json
           
           # Update core index including M5Stack
           arduino-cli core update-index
@@ -43,26 +40,36 @@ jobs:
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
+          # NEW: Add LibSSH-ESP32 library for SSH functionality
+          arduino-cli lib install "LibSSH-ESP32"
 
-      - name: Verify Board Availability
+      - name: Verify Board Details
         run: |
-          echo "Available boards:"
-          arduino-cli board listall | grep -i cardputer || echo "Searching for Cardputer..."
-          # Alternative check
-          arduino-cli core list | grep -i m5stack
+          echo "Checking board properties for M5Stack Cardputer:"
+          arduino-cli board details m5stack:esp32:m5stack_cardputer | grep -i "partition\|flash\|memory"
 
-      - name: Compile Sketch
+      - name: Compile Sketch with Huge App Partition
         run: |
           mkdir -p ./build
           
-          # Try with correct FQBN for M5Stack Cardputer
-          # The FQBN format is: m5stack:esp32:m5stack_cardputer
-          arduino-cli compile --fqbn m5stack:esp32:m5stack_cardputer --output-dir ./build ./CardPC
+          echo "Compiling with Huge App (3MB) partition scheme..."
+          echo "This is REQUIRED because your sketch was 107% of default storage"
           
-          # If above fails, try alternative FQBN
-          # arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
+          # Compile with huge_app partition scheme to fix "Sketch too big" error
+          arduino-cli compile \
+            --fqbn m5stack:esp32:m5stack_cardputer \
+            --build-property "board_build.partitions=huge_app.csv" \
+            --output-dir ./build ./CardPC
           
-          echo "Build completed successfully!"
+          # Check if compilation was successful
+          if [ $? -eq 0 ]; then
+            echo "✅ Compilation successful!"
+            echo "Generated files in ./build/:"
+            ls -la ./build/
+          else
+            echo "❌ Compilation failed"
+            exit 1
+          fi
 
       - name: Upload Binary
         uses: actions/upload-artifact@v4
