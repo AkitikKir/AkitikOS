@@ -56,6 +56,8 @@ jobs:
           find /home/runner/.arduino15/packages/m5stack/hardware/esp32 -name "*.csv" | grep -i partition | head -10
 
       - name: Compile with Correct Partition Scheme
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
         run: |
           mkdir -p ./build
           
@@ -66,6 +68,7 @@ jobs:
           echo "Trying Option 1: Using board options..."
           arduino-cli compile \
             --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=huge_app \
+            --build-property "build.extra_flags=-DAI_API_KEY=\\\"${AI_API_KEY}\\\"" \
             --output-dir ./build ./CardPC && echo "✅ Option 1 SUCCESS" || echo "❌ Option 1 failed"
           
           # OPTION 2: If Option 1 fails, try alternative scheme
@@ -73,6 +76,7 @@ jobs:
             echo "Trying Option 2: Alternative partition scheme..."
             arduino-cli compile \
               --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=min_spiffs \
+              --build-property "build.extra_flags=-DAI_API_KEY=\\\"${AI_API_KEY}\\\"" \
               --output-dir ./build ./CardPC && echo "✅ Option 2 SUCCESS" || echo "❌ Option 2 failed"
           fi
           
@@ -82,6 +86,7 @@ jobs:
             arduino-cli compile \
               --fqbn m5stack:esp32:m5stack_cardputer \
               --build-property "board_build.partitions=huge_app_3MB_no_ota.csv" \
+              --build-property "build.extra_flags=-DAI_API_KEY=\\\"${AI_API_KEY}\\\"" \
               --output-dir ./build ./CardPC && echo "✅ Option 3 SUCCESS" || echo "❌ Option 3 failed"
           fi
           
@@ -90,6 +95,7 @@ jobs:
             echo "Trying Option 4: default_16MB scheme..."
             arduino-cli compile \
               --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=default_16MB \
+              --build-property "build.extra_flags=-DAI_API_KEY=\\\"${AI_API_KEY}\\\"" \
               --output-dir ./build ./CardPC && echo "✅ Option 4 SUCCESS" || echo "❌ Option 4 failed"
           fi
           
@@ -106,6 +112,7 @@ jobs:
               --build-property "compiler.c.extra_flags=-Os" \
               --build-property "compiler.cpp.extra_flags=-Os" \
               --build-property "build.extra_flags=-DCORE_DEBUG_LEVEL=0" \
+              --build-property "build.extra_flags=-DAI_API_KEY=\\\"${AI_API_KEY}\\\"" \
               --output-dir ./build ./CardPC || (echo "❌ Final attempt failed" && exit 1)
           fi
 

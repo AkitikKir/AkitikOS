@@ -356,8 +356,16 @@ bool escPressedOnce(const Keyboard_Class::KeysState &status) {
   return pressed;
 }
 
+#ifndef AI_API_KEY
+#define AI_API_KEY ""
+#endif
+
 bool aiLoadApiKey() {
   if (aiApiKey.length()) return true;
+  if (String(AI_API_KEY).length()) {
+    aiApiKey = AI_API_KEY;
+    return true;
+  }
   File f = SD.open("/api_key.txt");
   if (!f) {
     return false;
