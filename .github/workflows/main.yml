@@ -43,6 +43,20 @@ jobs:
           # Add LibSSH-ESP32 library
           arduino-cli lib install "LibSSH-ESP32" || echo "LibSSH-ESP32 not available; SSH features will be disabled"
 
+      - name: Inject AI API key header
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          key = os.environ.get("AI_API_KEY", "")
+          with open("CardPC/ai_key.h", "w", encoding="ascii") as f:
+            f.write("#define AI_API_KEY ")
+            f.write(json.dumps(key))
+            f.write("\n")
+          PY
+
       - name: Check Available Partition Schemes
         run: |
           echo "Checking available partition schemes for M5Cardputer..."
@@ -59,54 +73,18 @@ jobs:
         run: |
           mkdir -p ./build
           
-          echo "=== TRY DIFFERENT PARTITION SCHEMES ==="
-          echo "Your sketch size: 1.41MB, needs >1.31MB limit"
-          
-          # OPTION 1: Try with board options (most reliable)
-          echo "Trying Option 1: Using board options..."
+          echo "=== COMPILE WITH HUGE_APP PARTITION ==="
           arduino-cli compile \
             --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=huge_app \
             --output-dir ./build ./CardPC && echo "✅ Option 1 SUCCESS" || echo "❌ Option 1 failed"
           
-          # OPTION 2: If Option 1 fails, try alternative scheme
-          if [ ! -f "./build/*.bin" ]; then
-            echo "Trying Option 2: Alternative partition scheme..."
-            arduino-cli compile \
-              --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=min_spiffs \
-              --output-dir ./build ./CardPC && echo "✅ Option 2 SUCCESS" || echo "❌ Option 2 failed"
-          fi
-          
-          # OPTION 3: Try with build property
-          if [ ! -f "./build/*.bin" ]; then
-            echo "Trying Option 3: With build property..."
-            arduino-cli compile \
-              --fqbn m5stack:esp32:m5stack_cardputer \
-              --build-property "board_build.partitions=huge_app_3MB_no_ota.csv" \
-              --output-dir ./build ./CardPC && echo "✅ Option 3 SUCCESS" || echo "❌ Option 3 failed"
-          fi
-          
-          # OPTION 4: Try default_16MB scheme
-          if [ ! -f "./build/*.bin" ]; then
-            echo "Trying Option 4: default_16MB scheme..."
-            arduino-cli compile \
-              --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=default_16MB \
-              --output-dir ./build ./CardPC && echo "✅ Option 4 SUCCESS" || echo "❌ Option 4 failed"
-          fi
-          
-          # Check if any succeeded
           if ls ./build/*.bin 1> /dev/null 2>&1; then
             echo "✅ Compilation successful!"
             echo "Generated files:"
             ls -la ./build/
           else
-            echo "❌ All partition schemes failed. Trying emergency optimization..."
-            # Last resort: Add compiler optimizations
-            arduino-cli compile \
-              --fqbn m5stack:esp32:m5stack_cardputer \
-              --build-property "compiler.c.extra_flags=-Os" \
-              --build-property "compiler.cpp.extra_flags=-Os" \
-              --build-property "build.extra_flags=-DCORE_DEBUG_LEVEL=0" \
-              --output-dir ./build ./CardPC || (echo "❌ Final attempt failed" && exit 1)
+            echo "❌ Compilation failed"
+            exit 1
           fi
 
       - name: Upload Binary

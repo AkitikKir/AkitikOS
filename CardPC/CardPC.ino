@@ -363,6 +363,12 @@ bool escPressedOnce(const Keyboard_Class::KeysState &status) {
   return pressed;
 }
 
+#if defined(__has_include)
+  #if __has_include("ai_key.h")
+    #include "ai_key.h"
+  #endif
+#endif
+
 #ifndef AI_API_KEY
 #define AI_API_KEY ""
 #endif
