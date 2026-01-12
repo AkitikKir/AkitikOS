@@ -2,6 +2,8 @@
   AkitikOS
 */
 
+struct Theme;
+
 enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 
 #include <Arduino.h>
