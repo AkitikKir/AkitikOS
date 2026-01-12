@@ -59,7 +59,7 @@ String inputLine;
 
 M5Canvas console(&M5Cardputer.Display);
 
-enum AppId { APP_HOME, APP_TERMINAL, APP_SETTINGS, APP_NETWORK, APP_WIFI, APP_WIFI_PASS, APP_SSH, APP_AI };
+enum AppId { APP_HOME, APP_TERMINAL, APP_SETTINGS, APP_NETWORK, APP_WIFI, APP_WIFI_PASS, APP_SSH, APP_FILES, APP_AI };
 AppId currentApp = APP_HOME;
 bool uiDirty = true;
 bool uiBgDirty = true;
@@ -107,10 +107,31 @@ String aiModel;
 String aiModels[8];
 int aiModelCount = 0;
 int aiModelIndex = 0;
+int aiModelScroll = 0;
 uint32_t aiErrorUntil = 0;
 bool aiLoading = false;
 enum AiUiState { AI_MODELS, AI_CHAT };
 AiUiState aiUiState = AI_MODELS;
+
+enum FileUiState { FILE_LIST, FILE_EDIT };
+FileUiState fileUiState = FILE_LIST;
+static const int FILE_MAX_ENTRIES = 32;
+static const int FILE_MAX_LINES = 48;
+static const int FILE_LINE_MAX = 96;
+String fileCwd = "/";
+String fileEntries[FILE_MAX_ENTRIES];
+bool fileEntryDir[FILE_MAX_ENTRIES];
+int fileCount = 0;
+int fileIndex = 0;
+int fileScroll = 0;
+String fileEditPath;
+String fileLines[FILE_MAX_LINES];
+int fileLineCount = 0;
+int fileLineIndex = 0;
+int fileLineScroll = 0;
+bool fileEditing = false;
+String fileEditBuffer;
+bool fileDirty = false;
 
 enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 SshState sshState = SSH_IDLE;
@@ -239,6 +260,225 @@ uint16_t blend565(uint16_t c1, uint16_t c2, uint8_t t) {
   return (r << 11) | (g << 5) | b;
 }
 
+String clampTextToWidth(const String &text, int maxWidth) {
+  if (maxWidth <= 0) return "";
+  if (M5Cardputer.Display.textWidth(text) <= maxWidth) return text;
+  const char *ellipsis = "...";
+  int ellipsisW = M5Cardputer.Display.textWidth(ellipsis);
+  if (ellipsisW >= maxWidth) return ".";
+  String out = text;
+  while (out.length() > 0 && M5Cardputer.Display.textWidth(out) > maxWidth - ellipsisW) {
+    out.remove(out.length() - 1);
+  }
+  out += ellipsis;
+  return out;
+}
+
+String maskText(size_t len, char c = '*') {
+  String out;
+  out.reserve(len);
+  for (size_t i = 0; i < len; ++i) out += c;
+  return out;
+}
+
+String formatBytes(uint64_t bytes) {
+  const char *units[] = {"B", "KB", "MB", "GB"};
+  int unit = 0;
+  double value = (double)bytes;
+  while (value >= 1024.0 && unit < 3) {
+    value /= 1024.0;
+    unit++;
+  }
+  char buf[24];
+  if (value < 10.0 && unit > 0) {
+    snprintf(buf, sizeof(buf), "%.1f%s", value, units[unit]);
+  } else {
+    snprintf(buf, sizeof(buf), "%.0f%s", value, units[unit]);
+  }
+  return String(buf);
+}
+
+int accelStep(uint32_t heldMs) {
+  if (heldMs > 900) return 3;
+  if (heldMs > 450) return 2;
+  return 1;
+}
+
+String baseNameFromPath(const String &path) {
+  int slash = path.lastIndexOf('/');
+  if (slash < 0) return path;
+  if (slash >= (int)path.length() - 1) return "";
+  return path.substring(slash + 1);
+}
+
+String joinPath(const String &base, const String &name) {
+  if (base == "/") return "/" + name;
+  return base + "/" + name;
+}
+
+String storageStatusLine() {
+  uint64_t flashTotal = ESP.getFlashChipSize();
+  uint64_t flashUsed = ESP.getSketchSize();
+  uint64_t flashFree = flashTotal > flashUsed ? (flashTotal - flashUsed) : 0;
+
+  uint64_t sdTotal = SD.totalBytes();
+  uint64_t sdUsed = SD.usedBytes();
+  uint64_t sdFree = sdTotal > sdUsed ? (sdTotal - sdUsed) : 0;
+
+  String sdPart = (sdTotal == 0) ? "SD:n/a" : ("SD:" + formatBytes(sdFree));
+  String flashPart = "F:" + formatBytes(flashFree);
+  return sdPart + " " + flashPart;
+}
+
+void fileScanDir() {
+  fileCount = 0;
+  File dir = SD.open(fileCwd);
+  if (!dir || !dir.isDirectory()) {
+    return;
+  }
+  File f = dir.openNextFile();
+  while (f && fileCount < FILE_MAX_ENTRIES) {
+    String name = baseNameFromPath(f.name());
+    if (name.length() == 0) {
+      f = dir.openNextFile();
+      continue;
+    }
+    fileEntries[fileCount] = name;
+    fileEntryDir[fileCount] = f.isDirectory();
+    fileCount++;
+    f = dir.openNextFile();
+  }
+  dir.close();
+  fileIndex = min(fileIndex, max(0, fileCount - 1));
+}
+
+void fileGoUp() {
+  if (fileCwd == "/") return;
+  int slash = fileCwd.lastIndexOf('/');
+  if (slash <= 0) {
+    fileCwd = "/";
+  } else {
+    fileCwd = fileCwd.substring(0, slash);
+  }
+  fileIndex = 0;
+  fileScroll = 0;
+  fileScanDir();
+}
+
+void fileOpenEditor(const String &path) {
+  File f = SD.open(path);
+  if (!f || f.isDirectory()) {
+    return;
+  }
+  fileEditPath = path;
+  fileLineCount = 0;
+  while (f.available() && fileLineCount < FILE_MAX_LINES) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    if (line.length() > FILE_LINE_MAX) {
+      line = line.substring(0, FILE_LINE_MAX);
+    }
+    fileLines[fileLineCount++] = line;
+  }
+  f.close();
+  if (fileLineCount == 0) {
+    fileLines[0] = "";
+    fileLineCount = 1;
+  }
+  fileLineIndex = 0;
+  fileLineScroll = 0;
+  fileEditing = false;
+  fileEditBuffer = "";
+  fileDirty = false;
+  fileUiState = FILE_EDIT;
+}
+
+void fileSaveEditor() {
+  if (!fileEditPath.length()) return;
+  SD.remove(fileEditPath);
+  File f = SD.open(fileEditPath, FILE_WRITE);
+  if (!f) {
+    return;
+  }
+  for (int i = 0; i < fileLineCount; ++i) {
+    f.println(fileLines[i]);
+  }
+  f.close();
+  fileDirty = false;
+}
+
+void fileInsertLine(int index) {
+  if (fileLineCount >= FILE_MAX_LINES) return;
+  index = constrain(index, 0, fileLineCount);
+  for (int i = fileLineCount; i > index; --i) {
+    fileLines[i] = fileLines[i - 1];
+  }
+  fileLines[index] = "";
+  fileLineCount++;
+  fileLineIndex = index;
+  fileDirty = true;
+}
+
+void fileDeleteLine(int index) {
+  if (fileLineCount <= 0) return;
+  index = constrain(index, 0, fileLineCount - 1);
+  for (int i = index; i < fileLineCount - 1; ++i) {
+    fileLines[i] = fileLines[i + 1];
+  }
+  fileLineCount--;
+  if (fileLineCount == 0) {
+    fileLines[0] = "";
+    fileLineCount = 1;
+  }
+  fileLineIndex = min(fileLineIndex, fileLineCount - 1);
+  fileDirty = true;
+}
+
+void fileUpdateLineScroll(int maxLines) {
+  if (fileLineIndex < fileLineScroll) {
+    fileLineScroll = fileLineIndex;
+  } else if (fileLineIndex >= fileLineScroll + maxLines) {
+    fileLineScroll = fileLineIndex - maxLines + 1;
+  }
+  int maxScroll = max(0, fileLineCount - maxLines);
+  if (fileLineScroll > maxScroll) fileLineScroll = maxScroll;
+}
+
+void drawActiveMarker(int x, int y, int h, const Theme &th) {
+  M5Cardputer.Display.fillRoundRect(x, y, 3, h, 2, th.accent);
+}
+
+void drawScrollIndicators(int listTop, int listBottom, int total, int start, int visible, const Theme &th) {
+  if (total <= visible) return;
+  int x = M5Cardputer.Display.width() - 7;
+  if (start > 0) {
+    int y = listTop + 2;
+    M5Cardputer.Display.fillTriangle(x, y, x - 4, y + 5, x + 4, y + 5, th.dim);
+  }
+  if (start + visible < total) {
+    int y = listBottom - 6;
+    M5Cardputer.Display.fillTriangle(x, y + 5, x - 4, y, x + 4, y, th.dim);
+  }
+}
+
+void drawEmptyState(int centerX, int centerY, const String &title, const String &hint, const Theme &th) {
+  uint16_t c = th.dim;
+  int iconX = centerX - 10;
+  int iconY = centerY - 14;
+  M5Cardputer.Display.drawCircle(iconX + 10, iconY + 8, 6, c);
+  M5Cardputer.Display.drawLine(iconX + 4, iconY + 14, iconX + 16, iconY + 14, c);
+  M5Cardputer.Display.drawLine(iconX + 8, iconY + 2, iconX + 12, iconY + 2, c);
+  M5Cardputer.Display.setTextColor(c, th.bg2);
+  int titleW = M5Cardputer.Display.textWidth(title);
+  M5Cardputer.Display.setCursor(centerX - titleW / 2, centerY + 2);
+  M5Cardputer.Display.print(title);
+  if (hint.length()) {
+    int hintW = M5Cardputer.Display.textWidth(hint);
+    M5Cardputer.Display.setCursor(centerX - hintW / 2, centerY + 14);
+    M5Cardputer.Display.print(hint);
+  }
+}
+
 void drawGradientBackground(const Theme &th) {
 #if UI_DIAG
   ++diagGradientRedraws;
@@ -262,6 +502,12 @@ void drawFocusRing(int x, int y, int w, int h, int r, uint16_t color) {
   M5Cardputer.Display.drawRoundRect(x - 1, y - 1, w + 2, h + 2, r + 1, color);
 }
 
+void drawGlowRing(int x, int y, int w, int h, int r, const Theme &th) {
+  uint16_t glow = blend565(th.accent, th.fg, 96);
+  M5Cardputer.Display.drawRoundRect(x - 2, y - 2, w + 4, h + 4, r + 2, glow);
+  M5Cardputer.Display.drawRoundRect(x - 1, y - 1, w + 2, h + 2, r + 1, glow);
+}
+
 void drawBatteryIcon(int x, int y, int level, bool charging, const Theme &th) {
   int w = 16;
   int h = 7;
@@ -280,6 +526,25 @@ void drawWifiIcon(int x, int y, bool on, const Theme &th) {
   M5Cardputer.Display.fillRect(x + 6, y + 2, 2, 6, c);
 }
 
+void drawWifiSignalBars(int x, int y, int rssi, const Theme &th, bool active) {
+  int level = 0;
+  if (rssi > -55) level = 4;
+  else if (rssi > -65) level = 3;
+  else if (rssi > -75) level = 2;
+  else if (rssi > -85) level = 1;
+  uint16_t on = active ? th.fg : th.dim;
+  uint16_t off = blend565(th.dim, th.bg2, 180);
+  int barW = 2;
+  int gap = 1;
+  int baseY = y + 10;
+  for (int i = 0; i < 4; ++i) {
+    int h = 3 + i * 2;
+    int bx = x + i * (barW + gap);
+    int by = baseY - h;
+    uint16_t c = i < level ? on : off;
+    M5Cardputer.Display.fillRect(bx, by, barW, h, c);
+  }
+}
 bool getTimeLabelBuf(char *out, size_t len) {
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 0)) {
@@ -418,8 +683,13 @@ void renderAiInputLine() {
   M5Cardputer.Display.setCursor(6, y + 2);
   M5Cardputer.Display.setTextColor(th.prompt, th.panel);
   M5Cardputer.Display.print("> ");
-  M5Cardputer.Display.setTextColor(th.fg, th.panel);
-  M5Cardputer.Display.print(aiInput);
+  if (aiInput.length() == 0) {
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.print("message...");
+  } else {
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.print(aiInput);
+  }
 }
 
 bool aiFetchModels() {
@@ -520,6 +790,8 @@ bool aiFetchModels() {
     return false;
   }
   if (aiModelIndex >= aiModelCount) aiModelIndex = 0;
+  if (aiModelIndex < 0) aiModelIndex = 0;
+  aiModelScroll = 0;
   aiModel = aiModels[aiModelIndex];
   return true;
 }
@@ -744,7 +1016,7 @@ void readNavArrows(const Keyboard_Class::KeysState &status, bool &up, bool &down
   right = hasRawKeyCode(keys, KEY_RAW_ARROW_RIGHT);
 }
 
-void drawHeader(const String &title) {
+void drawHeader(const String &title, const String &status) {
   const Theme &th = THEMES[themeIndex];
   M5Cardputer.Display.setFont(&fonts::Font0);
   M5Cardputer.Display.fillRect(0, 0, M5Cardputer.Display.width(), HEADER_HEIGHT, th.panel);
@@ -753,22 +1025,42 @@ void drawHeader(const String &title) {
   M5Cardputer.Display.setCursor(6, 4);
   M5Cardputer.Display.print(title);
 
-  int x = M5Cardputer.Display.width() - 6;
+  int right = M5Cardputer.Display.width() - 6;
   if (lastTimeLabel[0]) {
     size_t labelLen = strlen(lastTimeLabel);
-    x -= (labelLen * 6);
+    int timeX = right - (int)labelLen * 6;
     M5Cardputer.Display.setTextColor(th.dim, th.panel);
-    M5Cardputer.Display.setCursor(x, 4);
+    M5Cardputer.Display.setCursor(timeX, 4);
     M5Cardputer.Display.print(lastTimeLabel);
-    x -= 8;
+    right = timeX - 8;
   }
 
   int batt = M5Cardputer.Power.getBatteryLevel();
   bool chg = M5Cardputer.Power.isCharging();
-  x -= 20;
-  drawBatteryIcon(x, 6, batt, chg, th);
-  x -= 10;
-  drawWifiIcon(x, 6, WiFi.status() == WL_CONNECTED, th);
+  int batteryX = right - 20;
+  drawBatteryIcon(batteryX, 6, batt, chg, th);
+  int wifiX = batteryX - 10;
+  drawWifiIcon(wifiX, 6, WiFi.status() == WL_CONNECTED, th);
+  right = wifiX - 6;
+
+  if (status.length()) {
+    int textW = M5Cardputer.Display.textWidth(status);
+    int pillW = textW + 12;
+    int minX = 6 + M5Cardputer.Display.textWidth(title) + 8;
+    if (pillW > 0 && right - pillW >= minX) {
+      int pillX = right - pillW;
+      uint16_t pillBg = blend565(th.panel, th.accent, 96);
+      M5Cardputer.Display.fillRoundRect(pillX, 4, pillW, 12, 6, pillBg);
+      M5Cardputer.Display.drawRoundRect(pillX, 4, pillW, 12, 6, th.accent);
+      M5Cardputer.Display.setTextColor(th.fg, pillBg);
+      M5Cardputer.Display.setCursor(pillX + 6, 6);
+      M5Cardputer.Display.print(status);
+    }
+  }
+}
+
+void drawHeader(const String &title) {
+  drawHeader(title, "");
 }
 
 void drawFooter(const String &hint) {
@@ -777,7 +1069,8 @@ void drawFooter(const String &hint) {
   M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), FOOTER_HEIGHT, th.panel);
   M5Cardputer.Display.setTextColor(th.dim, th.panel);
   M5Cardputer.Display.setCursor(6, y + 2);
-  M5Cardputer.Display.print(hint);
+  int maxW = M5Cardputer.Display.width() - 12;
+  M5Cardputer.Display.print(clampTextToWidth(hint, maxW));
 }
 
 void drawIconTerminal(int x, int y, uint16_t bg, const Theme &th) {
@@ -842,6 +1135,15 @@ void drawIconAI(int x, int y, uint16_t bg, const Theme &th) {
   M5Cardputer.Display.print("AI");
 }
 
+void drawIconFolder(int x, int y, uint16_t bg, const Theme &th) {
+  (void)bg;
+  uint16_t frame = th.fg;
+  uint16_t fill = th.panel;
+  M5Cardputer.Display.drawRoundRect(x + 2, y + 5, 18, 8, 2, frame);
+  M5Cardputer.Display.fillRoundRect(x + 3, y + 6, 16, 6, 2, fill);
+  M5Cardputer.Display.drawRoundRect(x + 4, y + 3, 8, 4, 2, frame);
+}
+
 void drawTile(int x, int y, int w, int h, const String &title, const String &subtitle, bool active) {
   const Theme &th = THEMES[themeIndex];
   bool flash = millis() < pressFlashUntil;
@@ -849,15 +1151,19 @@ void drawTile(int x, int y, int w, int h, const String &title, const String &sub
   drawShadowBox(x, y, w, h, 10, tile, th.shadow);
   M5Cardputer.Display.drawRoundRect(x, y, w, h, 10, th.dim);
   if (active) {
+    drawGlowRing(x, y, w, h, 10, th);
     drawFocusRing(x + 2, y + 2, w - 4, h - 4, 9, th.accent);
+    drawActiveMarker(x + 6, y + 6, h - 12, th);
   }
 
+  int textX = x + 14;
+  int textMaxW = w - 14 - 34;
   M5Cardputer.Display.setTextColor(th.fg, tile);
-  M5Cardputer.Display.setCursor(x + 10, y + 8);
-  M5Cardputer.Display.print(title);
+  M5Cardputer.Display.setCursor(textX, y + 8);
+  M5Cardputer.Display.print(clampTextToWidth(title, textMaxW));
   M5Cardputer.Display.setTextColor(th.dim, tile);
-  M5Cardputer.Display.setCursor(x + 10, y + 22);
-  M5Cardputer.Display.print(subtitle);
+  M5Cardputer.Display.setCursor(textX, y + 22);
+  M5Cardputer.Display.print(clampTextToWidth(subtitle, textMaxW));
 
   int iconX = x + w - 32;
   int iconY = y + (h - 14) / 2;
@@ -865,6 +1171,8 @@ void drawTile(int x, int y, int w, int h, const String &title, const String &sub
     drawIconTerminal(iconX, iconY, tile, th);
   } else if (title == "Settings") {
     drawIconSettings(iconX, iconY, tile, th);
+  } else if (title == "Files") {
+    drawIconFolder(iconX, iconY, tile, th);
   } else if (title == "Wi-Fi" || title == "Network") {
     drawIconWifi(iconX, iconY, tile, th);
   } else {
@@ -924,12 +1232,17 @@ void renderInputLine() {
   M5Cardputer.Display.setCursor(6, y + 2);
   M5Cardputer.Display.setTextColor(th.prompt, th.panel);
   M5Cardputer.Display.print("> ");
-  M5Cardputer.Display.setTextColor(th.fg, th.panel);
-  M5Cardputer.Display.print(inputLine);
+  if (inputLine.length() == 0) {
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.print("type command");
+  } else {
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.print(inputLine);
+  }
   int textW = M5Cardputer.Display.textWidth(inputLine);
   int caretX = 18 + textW;
   if (caretOn && caretX < M5Cardputer.Display.width() - 6) {
-    M5Cardputer.Display.fillRect(caretX, y + 3, 6, 10, th.accent);
+    M5Cardputer.Display.fillRect(caretX, y + 3, 2, 10, th.accent);
   }
   M5Cardputer.Display.setFont(&fonts::Font0);
 }
@@ -971,10 +1284,15 @@ bool isDir(const String &path) {
 
 // ----------------- Команды -----------------
 void cmdHelp() {
-  printLine("Команды: help, clear, ls, cd, cat, nano");
-  printLine("wifi-status, connect <ssid> <pass>, ping <host>");
+  printLine("Команды: help, clear, ls, cd, pwd, cat, nano");
+  printLine("mkdir <dir>, rm <path>, mv <src> <dst>, cp <src> <dst>, touch <file>");
+  printLine("head <file> [n], tail <file> [n], echo <text>");
+  printLine("wifi-status, wifi-scan, wifi-disconnect");
+  printLine("connect <ssid> <pass>, ping <host>, ip, mac");
   printLine("ssh <user@host>");
-  printLine("date, beep, brightness 0-100, ir-send <HEX>, ir-learn");
+  printLine("date, uptime, heap, mem, battery, sysinfo");
+  printLine("beep, sound <on|off|toggle>, brightness 0-100, theme <n|next|prev>");
+  printLine("ir-send <HEX>, ir-learn, df, rmdir <dir>");
   printLine("sleep, reboot, shutdown, exit");
 }
 
@@ -1033,6 +1351,187 @@ void cmdLs(const String &pathArg) {
   dir.close();
 }
 
+void cmdPwd() {
+  printLine(cwd);
+}
+
+void cmdMkdir(const String &pathArg) {
+  if (!pathArg.length()) {
+    printLine("mkdir: нужен каталог");
+    return;
+  }
+  String path = normalizePath(cwd, pathArg);
+  if (SD.exists(path)) {
+    printLine("mkdir: уже существует");
+    return;
+  }
+  if (!SD.mkdir(path)) {
+    printLine("mkdir: ошибка");
+  }
+}
+
+void cmdRmdir(const String &pathArg) {
+  if (!pathArg.length()) {
+    printLine("rmdir: нужен каталог");
+    return;
+  }
+  String path = normalizePath(cwd, pathArg);
+  if (!isDir(path)) {
+    printLine("rmdir: нет такого каталога");
+    return;
+  }
+  if (!SD.rmdir(path)) {
+    printLine("rmdir: ошибка");
+  }
+}
+
+void cmdRm(const String &pathArg) {
+  if (!pathArg.length()) {
+    printLine("rm: нужен путь");
+    return;
+  }
+  String path = normalizePath(cwd, pathArg);
+  File f = SD.open(path);
+  if (!f) {
+    printLine("rm: не найдено");
+    return;
+  }
+  bool isDirFlag = f.isDirectory();
+  f.close();
+  if (isDirFlag) {
+    if (!SD.rmdir(path)) {
+      printLine("rm: ошибка удаления каталога");
+    }
+  } else if (!SD.remove(path)) {
+    printLine("rm: ошибка удаления файла");
+  }
+}
+
+void cmdMv(const String &srcArg, const String &dstArg) {
+  if (!srcArg.length() || !dstArg.length()) {
+    printLine("mv: нужен источник и назначение");
+    return;
+  }
+  String src = normalizePath(cwd, srcArg);
+  String dst = normalizePath(cwd, dstArg);
+  if (!SD.exists(src)) {
+    printLine("mv: источник не найден");
+    return;
+  }
+  if (SD.exists(dst)) {
+    printLine("mv: назначение существует");
+    return;
+  }
+  if (!SD.rename(src, dst)) {
+    printLine("mv: ошибка");
+  }
+}
+
+void cmdCp(const String &srcArg, const String &dstArg) {
+  if (!srcArg.length() || !dstArg.length()) {
+    printLine("cp: нужен источник и назначение");
+    return;
+  }
+  String src = normalizePath(cwd, srcArg);
+  String dst = normalizePath(cwd, dstArg);
+  File in = SD.open(src);
+  if (!in || in.isDirectory()) {
+    printLine("cp: источник не найден");
+    return;
+  }
+  if (SD.exists(dst)) {
+    SD.remove(dst);
+  }
+  File out = SD.open(dst, FILE_WRITE);
+  if (!out) {
+    in.close();
+    printLine("cp: ошибка назначения");
+    return;
+  }
+  uint8_t buf[256];
+  while (in.available()) {
+    int n = in.read(buf, sizeof(buf));
+    if (n <= 0) break;
+    out.write(buf, n);
+  }
+  in.close();
+  out.close();
+}
+
+void cmdTouch(const String &pathArg) {
+  if (!pathArg.length()) {
+    printLine("touch: нужен путь");
+    return;
+  }
+  String path = normalizePath(cwd, pathArg);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    printLine("touch: ошибка");
+    return;
+  }
+  f.close();
+}
+
+void cmdHead(const String &pathArg, int lines) {
+  if (!pathArg.length()) {
+    printLine("head: нужен файл");
+    return;
+  }
+  String path = normalizePath(cwd, pathArg);
+  File f = SD.open(path);
+  if (!f || f.isDirectory()) {
+    printLine("head: файл не найден");
+    return;
+  }
+  int count = 0;
+  while (f.available() && count < lines) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    printLine(line);
+    count++;
+  }
+  f.close();
+}
+
+void cmdTail(const String &pathArg, int lines) {
+  const int kMaxTail = 20;
+  if (!pathArg.length()) {
+    printLine("tail: нужен файл");
+    return;
+  }
+  if (lines > kMaxTail) {
+    printLine("tail: ограничено 20 строк");
+    lines = kMaxTail;
+  }
+  String path = normalizePath(cwd, pathArg);
+  File f = SD.open(path);
+  if (!f || f.isDirectory()) {
+    printLine("tail: файл не найден");
+    return;
+  }
+  String ring[kMaxTail];
+  int idx = 0;
+  int count = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.replace("\r", "");
+    ring[idx] = line;
+    idx = (idx + 1) % lines;
+    count++;
+  }
+  f.close();
+  int total = min(count, lines);
+  int start = count >= lines ? idx : 0;
+  for (int i = 0; i < total; ++i) {
+    int pos = (start + i) % lines;
+    printLine(ring[pos]);
+  }
+}
+
+void cmdEcho(const String &text) {
+  printLine(text);
+}
+
 void cmdCd(const String &pathArg) {
   if (!pathArg.length()) {
     cwd = "/";
@@ -1089,6 +1588,41 @@ void cmdWifiStatus() {
   }
 }
 
+void cmdDf() {
+#if defined(ARDUINO_ARCH_ESP32)
+  uint64_t total = SD.totalBytes();
+  uint64_t used = SD.usedBytes();
+  if (total == 0) {
+    printLine("df: SD не доступна");
+    return;
+  }
+  uint64_t freeBytes = total - used;
+  printLine("SD: " + formatBytes(used) + " used / " + formatBytes(total));
+  printLine("SD: " + formatBytes(freeBytes) + " free");
+#else
+  printLine("df: not supported");
+#endif
+}
+
+void cmdWifiScan() {
+  WiFi.mode(WIFI_STA);
+  printLine("Wi-Fi: scanning...");
+  int n = WiFi.scanNetworks(false, true);
+  if (n <= 0) {
+    printLine("Wi-Fi: нет сетей");
+    return;
+  }
+  for (int i = 0; i < n; ++i) {
+    String line = WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dB)";
+    printLine(line);
+  }
+}
+
+void cmdWifiDisconnect() {
+  WiFi.disconnect();
+  printLine("Wi-Fi: отключено");
+}
+
 void cmdConnect(const String &ssid, const String &pass) {
   if (!ssid.length()) {
     printLine("connect: нужен SSID");
@@ -1134,9 +1668,68 @@ void cmdDate() {
   }
 }
 
+void cmdUptime() {
+  uint32_t ms = millis();
+  uint32_t sec = ms / 1000;
+  uint32_t min = sec / 60;
+  uint32_t hr = min / 60;
+  sec %= 60;
+  min %= 60;
+  printLine("uptime: " + String(hr) + "h " + String(min) + "m " + String(sec) + "s");
+}
+
+void cmdHeap() {
+  printLine("heap: " + String(ESP.getFreeHeap()));
+}
+
+void cmdMem() {
+  uint32_t heapFree = ESP.getFreeHeap();
+  uint32_t heapSize = ESP.getHeapSize();
+  printLine("heap: " + formatBytes(heapFree) + " free / " + formatBytes(heapSize));
+#if defined(BOARD_HAS_PSRAM)
+  uint32_t psramFree = ESP.getFreePsram();
+  uint32_t psramSize = ESP.getPsramSize();
+  printLine("psram: " + formatBytes(psramFree) + " free / " + formatBytes(psramSize));
+#else
+  printLine("psram: not present");
+#endif
+}
+
+void cmdSysinfo() {
+  printLine("chip: " + String(ESP.getChipModel()) + " rev " + String(ESP.getChipRevision()));
+  printLine("cores: " + String(ESP.getChipCores()) + " cpu " + String(ESP.getCpuFreqMHz()) + "MHz");
+  printLine("flash: " + formatBytes(ESP.getFlashChipSize()));
+  printLine("sdk: " + String(ESP.getSdkVersion()));
+}
+
+void cmdBattery() {
+  int batt = M5Cardputer.Power.getBatteryLevel();
+  bool chg = M5Cardputer.Power.isCharging();
+  printLine("battery: " + String(batt) + "% " + String(chg ? "charging" : "idle"));
+}
+
+void cmdIp() {
+  if (WiFi.status() == WL_CONNECTED) {
+    printLine("ip: " + WiFi.localIP().toString());
+  } else {
+    printLine("ip: Wi-Fi не подключено");
+  }
+}
+
+void cmdMac() {
+  printLine("mac: " + WiFi.macAddress());
+}
+
 void cmdBeep() {
   if (!soundEnabled) return;
   M5Cardputer.Speaker.tone(4000, 80);
+}
+
+void cmdSound(const String &arg) {
+  if (arg == "on") soundEnabled = true;
+  else if (arg == "off") soundEnabled = false;
+  else if (arg == "toggle") soundEnabled = !soundEnabled;
+  printLine(String("sound: ") + (soundEnabled ? "on" : "off"));
 }
 
 void cmdBrightness(int value) {
@@ -1147,6 +1740,26 @@ void cmdBrightness(int value) {
   printLine("brightness: " + String(value), th.accent);
 }
 
+void cmdTheme(const String &arg) {
+  if (!arg.length()) {
+    printLine("theme: " + String(themeIndex + 1) + "/" + String(THEME_COUNT));
+    return;
+  }
+  if (arg == "next") {
+    themeIndex = (themeIndex + 1) % THEME_COUNT;
+  } else if (arg == "prev") {
+    themeIndex = (themeIndex - 1 + THEME_COUNT) % THEME_COUNT;
+  } else {
+    int idx = arg.toInt() - 1;
+    if (idx < 0 || idx >= THEME_COUNT) {
+      printLine("theme: 1-" + String(THEME_COUNT));
+      return;
+    }
+    themeIndex = idx;
+  }
+  applyTheme();
+  printLine("theme: " + String(themeIndex + 1) + "/" + String(THEME_COUNT));
+}
 // Пример: ir-send FF00AA
 void cmdIrSend(const String &hexStr) {
   if (!hexStr.length()) {
@@ -1192,9 +1805,68 @@ void handleCommand(const String &line) {
   if (cmd.startsWith("ls ")) return cmdLs(cmd.substring(3));
   if (cmd == "cd") return cmdCd("");
   if (cmd.startsWith("cd ")) return cmdCd(cmd.substring(3));
+  if (cmd == "pwd") return cmdPwd();
   if (cmd.startsWith("cat ")) return cmdCat(cmd.substring(4));
   if (cmd.startsWith("nano ")) return cmdNanoStart(cmd.substring(5));
+  if (cmd.startsWith("mkdir ")) return cmdMkdir(cmd.substring(6));
+  if (cmd.startsWith("rmdir ")) return cmdRmdir(cmd.substring(6));
+  if (cmd.startsWith("rm ")) return cmdRm(cmd.substring(3));
+  if (cmd.startsWith("mv ")) {
+    String rest = cmd.substring(3);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp < 0) {
+      printLine("mv: usage mv <src> <dst>");
+      return;
+    }
+    String src = rest.substring(0, sp);
+    String dst = rest.substring(sp + 1);
+    dst.trim();
+    return cmdMv(src, dst);
+  }
+  if (cmd.startsWith("cp ")) {
+    String rest = cmd.substring(3);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    if (sp < 0) {
+      printLine("cp: usage cp <src> <dst>");
+      return;
+    }
+    String src = rest.substring(0, sp);
+    String dst = rest.substring(sp + 1);
+    dst.trim();
+    return cmdCp(src, dst);
+  }
+  if (cmd.startsWith("touch ")) return cmdTouch(cmd.substring(6));
+  if (cmd.startsWith("head ")) {
+    String rest = cmd.substring(5);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    String path = rest;
+    int lines = 10;
+    if (sp > 0) {
+      path = rest.substring(0, sp);
+      lines = max(1, rest.substring(sp + 1).toInt());
+    }
+    return cmdHead(path, lines);
+  }
+  if (cmd.startsWith("tail ")) {
+    String rest = cmd.substring(5);
+    rest.trim();
+    int sp = rest.indexOf(' ');
+    String path = rest;
+    int lines = 10;
+    if (sp > 0) {
+      path = rest.substring(0, sp);
+      lines = max(1, rest.substring(sp + 1).toInt());
+    }
+    return cmdTail(path, lines);
+  }
+  if (cmd.startsWith("echo ")) return cmdEcho(cmd.substring(5));
+  if (cmd == "df") return cmdDf();
   if (cmd == "wifi-status") return cmdWifiStatus();
+  if (cmd == "wifi-scan") return cmdWifiScan();
+  if (cmd == "wifi-disconnect") return cmdWifiDisconnect();
   if (cmd.startsWith("connect ")) {
     int sp = cmd.indexOf(' ', 8);
     String ssid = cmd.substring(8, sp > 0 ? sp : cmd.length());
@@ -1204,8 +1876,19 @@ void handleCommand(const String &line) {
   if (cmd.startsWith("ping ")) return cmdPing(cmd.substring(5));
   if (cmd.startsWith("ssh ")) return cmdSsh(cmd.substring(4));
   if (cmd == "date") return cmdDate();
+  if (cmd == "uptime") return cmdUptime();
+  if (cmd == "heap") return cmdHeap();
+  if (cmd == "mem") return cmdMem();
+  if (cmd == "battery") return cmdBattery();
+  if (cmd == "sysinfo") return cmdSysinfo();
+  if (cmd == "ip") return cmdIp();
+  if (cmd == "mac") return cmdMac();
   if (cmd == "beep") return cmdBeep();
+  if (cmd == "sound") return cmdSound("");
+  if (cmd.startsWith("sound ")) return cmdSound(cmd.substring(6));
   if (cmd.startsWith("brightness ")) return cmdBrightness(cmd.substring(11).toInt());
+  if (cmd == "theme") return cmdTheme("");
+  if (cmd.startsWith("theme ")) return cmdTheme(cmd.substring(6));
   if (cmd.startsWith("ir-send ")) return cmdIrSend(cmd.substring(8));
   if (cmd == "ir-learn") return cmdIrLearn();
   if (cmd == "sleep") return cmdSleep();
@@ -1405,11 +2088,12 @@ void drawHome() {
   int y = listTop;
   for (int i = 0; i < maxVisible; ++i) {
     int idx = homeScroll + i;
-    if (idx > 3) break;
+    if (idx > 4) break;
     if (idx == 0) drawTile(8, y, cardW, cardH, "Terminal", "Command Line", homeIndex == 0);
     else if (idx == 1) drawTile(8, y, cardW, cardH, "Settings", "Display & Sound", homeIndex == 1);
     else if (idx == 2) drawTile(8, y, cardW, cardH, "Network", "Wi-Fi & SSH", homeIndex == 2);
-    else drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 3);
+    else if (idx == 3) drawTile(8, y, cardW, cardH, "Files", "Manager & Edit", homeIndex == 3);
+    else drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 4);
     y += cardH + gap;
   }
 
@@ -1433,12 +2117,14 @@ void drawSettings() {
     drawShadowBox(panelX, y + i * lineH, panelW, lineH - 2, 6, bg, th.shadow);
     M5Cardputer.Display.drawRoundRect(panelX, y + i * lineH, panelW, lineH - 2, 6, th.dim);
     if (active) {
+      drawGlowRing(panelX, y + i * lineH, panelW, lineH - 2, 6, th);
       drawFocusRing(panelX + 2, y + i * lineH + 2, panelW - 4, lineH - 6, 5, th.accent);
+      drawActiveMarker(panelX + 6, y + i * lineH + 4, lineH - 10, th);
     }
     M5Cardputer.Display.setTextColor(th.fg, bg);
     if (i == 0) {
       drawMiniIconSun(panelX + 6, y + i * lineH + 4, th);
-      M5Cardputer.Display.setCursor(24, y + i * lineH + 5);
+      M5Cardputer.Display.setCursor(26, y + i * lineH + 5);
       M5Cardputer.Display.print("Brightness");
       int barX = panelX + 120;
       int barY = y + i * lineH + 8;
@@ -1446,7 +2132,7 @@ void drawSettings() {
       drawSlider(barX, barY, barW, brightnessPercent, th, active);
     } else if (i == 1) {
       drawMiniIconPalette(panelX + 6, y + i * lineH + 4, th);
-      M5Cardputer.Display.setCursor(24, y + i * lineH + 5);
+      M5Cardputer.Display.setCursor(26, y + i * lineH + 5);
       M5Cardputer.Display.print("Theme");
       int infoX = panelX + 120;
       drawThemePreview(infoX, y + i * lineH + 6, THEMES[themeIndex]);
@@ -1454,12 +2140,12 @@ void drawSettings() {
       M5Cardputer.Display.printf("%d/%d", themeIndex + 1, THEME_COUNT);
     } else if (i == 2) {
       drawMiniIconSound(panelX + 6, y + i * lineH + 4, th);
-      M5Cardputer.Display.setCursor(24, y + i * lineH + 5);
+      M5Cardputer.Display.setCursor(26, y + i * lineH + 5);
       M5Cardputer.Display.print("Sound");
       int toggleX = panelX + panelW - 52;
       drawToggle(toggleX, y + i * lineH + 5, soundEnabled, th, active);
     } else {
-      M5Cardputer.Display.setCursor(24, y + i * lineH + 5);
+      M5Cardputer.Display.setCursor(26, y + i * lineH + 5);
       M5Cardputer.Display.print("Back");
     }
   }
@@ -1489,8 +2175,13 @@ void drawWifiInputLine() {
   M5Cardputer.Display.setCursor(6, y + 2);
   M5Cardputer.Display.setTextColor(th.prompt, th.panel);
   M5Cardputer.Display.print("PASS ");
-  M5Cardputer.Display.setTextColor(th.fg, th.panel);
-  M5Cardputer.Display.print(wifiPass);
+  if (wifiPassLen == 0) {
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.print("password");
+  } else {
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.print(maskText(wifiPassLen));
+  }
 }
 
 void drawWifiInputLineAt(int y) {
@@ -1500,14 +2191,35 @@ void drawWifiInputLineAt(int y) {
   M5Cardputer.Display.setCursor(6, y + 2);
   M5Cardputer.Display.setTextColor(th.prompt, th.panel);
   M5Cardputer.Display.print("PASS ");
-  M5Cardputer.Display.setTextColor(th.fg, th.panel);
-  M5Cardputer.Display.print(wifiPass);
+  if (wifiPassLen == 0) {
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.print("password");
+  } else {
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.print(maskText(wifiPassLen));
+  }
+}
+
+void drawFileEditInputLine(int y) {
+  const Theme &th = THEMES[themeIndex];
+  M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), INPUT_AREA_HEIGHT, th.panel);
+  M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), 1, th.accent);
+  M5Cardputer.Display.setCursor(6, y + 2);
+  M5Cardputer.Display.setTextColor(th.prompt, th.panel);
+  M5Cardputer.Display.print("EDIT ");
+  if (!fileEditing) {
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.print("Enter to edit line");
+  } else {
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.print(fileEditBuffer);
+  }
 }
 
 void drawWifiFetching() {
   const Theme &th = THEMES[themeIndex];
   drawGradientBackground(th);
-  drawHeader("Wi-Fi");
+  drawHeader("Wi-Fi", "scanning");
 
   const char *line1 = "Fetching Wi-Fi";
   const char *line2 = "networks...";
@@ -1533,7 +2245,20 @@ void drawWifi() {
   if (uiBgDirty) {
     drawGradientBackground(th);
   }
-  drawHeader("Wi-Fi");
+  String status;
+  if (wifiConnecting) {
+    status = "connecting";
+  } else if (wifiScanning) {
+    status = "scanning";
+  } else if (wifiCount > 0) {
+    status = String(wifiIndex + 1) + "/" + String(wifiCount);
+    if (wifiIndex >= 0 && wifiIndex < wifiCount) {
+      status += " " + String(wifiList[wifiIndex].rssi) + "dB";
+    }
+  } else {
+    status = "0/0";
+  }
+  drawHeader("Wi-Fi", status);
 
   int listTop = HEADER_HEIGHT + 6;
   int listBottom = M5Cardputer.Display.height() - FOOTER_HEIGHT - 4;
@@ -1541,6 +2266,9 @@ void drawWifi() {
   int maxLines = (listBottom - listTop) / lineH;
   M5Cardputer.Display.fillRect(4, listTop - 2, M5Cardputer.Display.width() - 8,
                                listBottom - listTop + 4, th.bg2);
+  int textX = 16;
+  int barsW = 12;
+  int textMaxW = M5Cardputer.Display.width() - textX - barsW - 14;
   int start = 0;
   if (wifiIndex >= maxLines) {
     start = wifiIndex - maxLines + 1;
@@ -1553,17 +2281,18 @@ void drawWifi() {
     bool active = idx == wifiIndex;
     uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
     M5Cardputer.Display.fillRoundRect(6, y, M5Cardputer.Display.width() - 12, lineH - 2, 4, bg);
+    if (active) {
+      drawGlowRing(6, y, M5Cardputer.Display.width() - 12, lineH - 2, 4, th);
+      drawActiveMarker(8, y + 2, lineH - 6, th);
+    }
     M5Cardputer.Display.setTextColor(th.fg, bg);
-    M5Cardputer.Display.setCursor(12, y + 3);
-    M5Cardputer.Display.print(wifiList[idx].ssid);
-    M5Cardputer.Display.setTextColor(th.dim, bg);
-    M5Cardputer.Display.setCursor(M5Cardputer.Display.width() - 50, y + 3);
-    M5Cardputer.Display.printf("%ddB", (int)wifiList[idx].rssi);
+    M5Cardputer.Display.setCursor(textX, y + 3);
+    M5Cardputer.Display.print(clampTextToWidth(wifiList[idx].ssid, textMaxW));
+    drawWifiSignalBars(M5Cardputer.Display.width() - 20, y + 2, wifiList[idx].rssi, th, active);
   }
+  drawScrollIndicators(listTop, listBottom, wifiCount, start, maxLines, th);
   if (wifiCount == 0 && !wifiScanning) {
-    M5Cardputer.Display.setTextColor(th.dim, th.bg2);
-    M5Cardputer.Display.setCursor(12, listTop + 4);
-    M5Cardputer.Display.print("No networks");
+    drawEmptyState(M5Cardputer.Display.width() / 2, (listTop + listBottom) / 2, "No networks", "R to scan", th);
   }
 
   if (wifiUiState == WIFI_INPUT) {
@@ -1616,10 +2345,12 @@ void drawNetwork() {
     drawShadowBox(panelX, y + i * lineH, panelW, lineH - 2, 6, bg, th.shadow);
     M5Cardputer.Display.drawRoundRect(panelX, y + i * lineH, panelW, lineH - 2, 6, th.dim);
     if (active) {
+      drawGlowRing(panelX, y + i * lineH, panelW, lineH - 2, 6, th);
       drawFocusRing(panelX + 2, y + i * lineH + 2, panelW - 4, lineH - 6, 5, th.accent);
+      drawActiveMarker(panelX + 6, y + i * lineH + 4, lineH - 10, th);
     }
     M5Cardputer.Display.setTextColor(th.fg, bg);
-    M5Cardputer.Display.setCursor(16, y + i * lineH + 5);
+    M5Cardputer.Display.setCursor(26, y + i * lineH + 5);
     M5Cardputer.Display.print(i == 0 ? "Wi-Fi" : "SSH");
   }
 
@@ -1637,6 +2368,8 @@ void drawSsh() {
   int lineH = 22;
   int panelX = 6;
   int panelW = M5Cardputer.Display.width() - 12;
+  int valueX = panelX + 70;
+  int valueMaxW = panelW - (valueX - panelX) - 8;
   const char *labels[4] = {"Host", "User", "Port", "Pass"};
   for (int i = 0; i < 4; ++i) {
     bool active = sshFieldIndex == i;
@@ -1644,7 +2377,9 @@ void drawSsh() {
     drawShadowBox(panelX, y + i * lineH, panelW, lineH - 2, 6, bg, th.shadow);
     M5Cardputer.Display.drawRoundRect(panelX, y + i * lineH, panelW, lineH - 2, 6, th.dim);
     if (active) {
+      drawGlowRing(panelX, y + i * lineH, panelW, lineH - 2, 6, th);
       drawFocusRing(panelX + 2, y + i * lineH + 2, panelW - 4, lineH - 6, 5, th.accent);
+      drawActiveMarker(panelX + 6, y + i * lineH + 4, lineH - 10, th);
     }
     M5Cardputer.Display.setTextColor(th.fg, bg);
     M5Cardputer.Display.setCursor(12, y + i * lineH + 5);
@@ -1659,8 +2394,12 @@ void drawSsh() {
       for (size_t j = 0; j < sshUiPass.length(); ++j) value += '*';
     }
     M5Cardputer.Display.setTextColor(th.dim, bg);
-    M5Cardputer.Display.setCursor(70, y + i * lineH + 5);
-    M5Cardputer.Display.print(value);
+    M5Cardputer.Display.setCursor(valueX, y + i * lineH + 5);
+    if (value.length() == 0) {
+      M5Cardputer.Display.print("<empty>");
+    } else {
+      M5Cardputer.Display.print(clampTextToWidth(value, valueMaxW));
+    }
   }
 
   if (millis() < sshUiErrorUntil) {
@@ -1675,7 +2414,15 @@ void drawAI() {
   if (uiBgDirty) {
     drawGradientBackground(th);
   }
-  drawHeader("AI");
+  String status;
+  if (aiUiState == AI_CHAT) {
+    status = "chat";
+  } else if (aiModelCount > 0) {
+    status = String(aiModelIndex + 1) + "/" + String(aiModelCount);
+  } else {
+    status = "0/0";
+  }
+  drawHeader("AI", status);
 
   if (aiUiState == AI_MODELS) {
     int listTop = HEADER_HEIGHT + 6;
@@ -1685,21 +2432,29 @@ void drawAI() {
     M5Cardputer.Display.fillRect(4, listTop - 2, M5Cardputer.Display.width() - 8,
                                  listBottom - listTop + 4, th.bg2);
 
-    for (int i = 0; i < maxLines && i < aiModelCount; ++i) {
-      int idx = i;
+    int start = max(0, aiModelScroll);
+    int maxScroll = max(0, aiModelCount - maxLines);
+    if (start > maxScroll) start = maxScroll;
+    int textX = 16;
+    int textMaxW = M5Cardputer.Display.width() - textX - 12;
+    for (int i = 0; i < maxLines && (start + i) < aiModelCount; ++i) {
+      int idx = start + i;
       int y = listTop + i * lineH;
       bool active = idx == aiModelIndex;
       uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
       M5Cardputer.Display.fillRoundRect(6, y, M5Cardputer.Display.width() - 12, lineH - 2, 4, bg);
+      if (active) {
+        drawGlowRing(6, y, M5Cardputer.Display.width() - 12, lineH - 2, 4, th);
+        drawActiveMarker(8, y + 2, lineH - 6, th);
+      }
       M5Cardputer.Display.setTextColor(th.fg, bg);
-      M5Cardputer.Display.setCursor(12, y + 3);
-      M5Cardputer.Display.print(aiModels[idx]);
+      M5Cardputer.Display.setCursor(textX, y + 3);
+      M5Cardputer.Display.print(clampTextToWidth(aiModels[idx], textMaxW));
     }
+    drawScrollIndicators(listTop, listBottom, aiModelCount, start, maxLines, th);
 
     if (aiModelCount == 0) {
-      M5Cardputer.Display.setTextColor(th.dim, th.bg2);
-      M5Cardputer.Display.setCursor(12, listTop + 4);
-      M5Cardputer.Display.print("No models");
+      drawEmptyState(M5Cardputer.Display.width() / 2, (listTop + listBottom) / 2, "No models", "R to refresh", th);
     }
 
     if (millis() < aiErrorUntil) {
@@ -1713,6 +2468,111 @@ void drawAI() {
     console.pushSprite(consoleX, consoleY);
     renderAiInputLine();
     drawFooter("Enter send  Esc models");
+  }
+}
+
+void drawFiles() {
+  const Theme &th = THEMES[themeIndex];
+  if (uiBgDirty) {
+    drawGradientBackground(th);
+  }
+  if (fileUiState == FILE_LIST) {
+    drawHeader("Files");
+
+    int w = M5Cardputer.Display.width();
+    int h = M5Cardputer.Display.height();
+    int pathY = HEADER_HEIGHT + 4;
+    M5Cardputer.Display.fillRoundRect(6, pathY, w - 12, 12, 4, th.bg2);
+    M5Cardputer.Display.setTextColor(th.dim, th.bg2);
+    M5Cardputer.Display.setCursor(10, pathY + 2);
+    M5Cardputer.Display.print(clampTextToWidth(fileCwd, w - 24));
+
+    int listTop = pathY + 16;
+    int listBottom = h - FOOTER_HEIGHT - 4;
+    int lineH = 16;
+    int maxLines = max(1, (listBottom - listTop) / lineH);
+    M5Cardputer.Display.fillRect(4, listTop - 2, w - 8, listBottom - listTop + 4, th.bg2);
+
+    if (fileIndex < fileScroll) fileScroll = fileIndex;
+    if (fileIndex >= fileScroll + maxLines) fileScroll = fileIndex - maxLines + 1;
+    int maxScroll = max(0, fileCount - maxLines);
+    if (fileScroll > maxScroll) fileScroll = maxScroll;
+
+    int textX = 18;
+    int textMaxW = w - textX - 12;
+    for (int i = 0; i < maxLines && (fileScroll + i) < fileCount; ++i) {
+      int idx = fileScroll + i;
+      int y = listTop + i * lineH;
+      bool active = idx == fileIndex;
+      uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
+      M5Cardputer.Display.fillRoundRect(6, y, w - 12, lineH - 2, 4, bg);
+      if (active) {
+        drawGlowRing(6, y, w - 12, lineH - 2, 4, th);
+        drawActiveMarker(8, y + 2, lineH - 6, th);
+      }
+      String name = fileEntries[idx];
+      if (fileEntryDir[idx]) name += "/";
+      M5Cardputer.Display.setTextColor(th.fg, bg);
+      M5Cardputer.Display.setCursor(textX, y + 3);
+      M5Cardputer.Display.print(clampTextToWidth(name, textMaxW));
+    }
+    drawScrollIndicators(listTop, listBottom, fileCount, fileScroll, maxLines, th);
+
+    if (fileCount == 0) {
+      if (SD.totalBytes() == 0) {
+        drawEmptyState(w / 2, (listTop + listBottom) / 2, "SD not ready", "Check card", th);
+      } else {
+        drawEmptyState(w / 2, (listTop + listBottom) / 2, "No files", "Use terminal", th);
+      }
+    }
+
+    drawFooter(storageStatusLine() + "  Enter open  Esc back");
+    return;
+  }
+
+  String status = fileDirty ? "modified" : "saved";
+  drawHeader("Edit", status);
+
+  int w = M5Cardputer.Display.width();
+  int h = M5Cardputer.Display.height();
+  int nameY = HEADER_HEIGHT + 4;
+  M5Cardputer.Display.fillRoundRect(6, nameY, w - 12, 12, 4, th.bg2);
+  M5Cardputer.Display.setTextColor(th.dim, th.bg2);
+  M5Cardputer.Display.setCursor(10, nameY + 2);
+  M5Cardputer.Display.print(clampTextToWidth(baseNameFromPath(fileEditPath), w - 24));
+
+  int listTop = nameY + 16;
+  int listBottom = h - FOOTER_HEIGHT - INPUT_AREA_HEIGHT - 4;
+  int lineH = 14;
+  int maxLines = max(1, (listBottom - listTop) / lineH);
+  M5Cardputer.Display.fillRect(4, listTop - 2, w - 8, listBottom - listTop + 4, th.bg2);
+  fileUpdateLineScroll(maxLines);
+
+  int textX = 18;
+  int textMaxW = w - textX - 12;
+  for (int i = 0; i < maxLines && (fileLineScroll + i) < fileLineCount; ++i) {
+    int idx = fileLineScroll + i;
+    int y = listTop + i * lineH;
+    bool active = idx == fileLineIndex;
+    uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
+    M5Cardputer.Display.fillRoundRect(6, y, w - 12, lineH - 2, 4, bg);
+    if (active) {
+      drawGlowRing(6, y, w - 12, lineH - 2, 4, th);
+      drawActiveMarker(8, y + 2, lineH - 6, th);
+    }
+    String line = fileLines[idx];
+    M5Cardputer.Display.setTextColor(th.fg, bg);
+    M5Cardputer.Display.setCursor(textX, y + 2);
+    M5Cardputer.Display.print(clampTextToWidth(line, textMaxW));
+  }
+  drawScrollIndicators(listTop, listBottom, fileLineCount, fileLineScroll, maxLines, th);
+
+  int inputY = h - FOOTER_HEIGHT - INPUT_AREA_HEIGHT;
+  drawFileEditInputLine(inputY);
+  if (fileEditing) {
+    drawFooter("Enter save line  Esc cancel");
+  } else {
+    drawFooter("Enter edit  N new  D del  S save  Esc back");
   }
 }
 
@@ -1734,6 +2594,8 @@ void drawApp() {
     drawSsh();
   } else if (currentApp == APP_AI) {
     drawAI();
+  } else if (currentApp == APP_FILES) {
+    drawFiles();
   } else {
     drawTerminal();
   }
@@ -1928,13 +2790,14 @@ void handleKeyboardHome() {
   if (up && keyRepeatAllowed('U', true)) {
     homeIndex = max(0, homeIndex - 1);
   } else if (down && keyRepeatAllowed('D', true)) {
-    homeIndex = min(3, homeIndex + 1);
+    homeIndex = min(4, homeIndex + 1);
   }
 
   if (enterPressed || btnA) {
     if (homeIndex == 0) currentApp = APP_TERMINAL;
     else if (homeIndex == 1) currentApp = APP_SETTINGS;
     else if (homeIndex == 2) currentApp = APP_NETWORK;
+    else if (homeIndex == 3) currentApp = APP_FILES;
     else currentApp = APP_AI;
   }
 
@@ -1945,6 +2808,11 @@ void handleKeyboardHome() {
       wifiUiState = WIFI_LIST;
       wifiConnecting = false;
       wifiStartScan();
+    } else if (currentApp == APP_FILES) {
+      fileUiState = FILE_LIST;
+      fileEditing = false;
+      fileEditBuffer = "";
+      fileScanDir();
     }
   }
   if (changed || enterPressed || btnA) {
@@ -2158,6 +3026,138 @@ void handleKeyboardSsh() {
   }
 }
 
+void handleKeyboardFiles() {
+  bool btnA = M5Cardputer.BtnA.wasPressed();
+  Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+  bool enterPressed = enterPressedOnce(status);
+  bool up = false;
+  bool down = false;
+  bool left = false;
+  bool right = false;
+  readNavArrows(status, up, down, left, right);
+  bool anyKey = !status.word.empty() || status.enter || status.del || up || down;
+  if (!btnA && !anyKey) {
+    keyRepeatAllowed(0, false);
+    return;
+  }
+  lastHeaderUpdateMs = 0;
+
+  if (fileUiState == FILE_LIST) {
+    if (!up && !down) {
+      keyRepeatAllowed(0, false);
+    }
+    if (fileCount > 0) {
+      if (up && keyRepeatAllowed('U', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        fileIndex = max(0, fileIndex - step);
+      } else if (down && keyRepeatAllowed('D', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        fileIndex = min(fileCount - 1, fileIndex + step);
+      }
+    }
+    if (!status.word.empty()) {
+      char c = status.word[0];
+      if (c == 'r' || c == 'R') fileScanDir();
+    }
+    if (escPressedOnce(status)) {
+      if (fileCwd == "/") {
+        currentApp = APP_HOME;
+        uiDirty = true;
+        uiBgDirty = true;
+        return;
+      }
+      fileGoUp();
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (enterPressed || btnA) {
+      if (fileCount > 0) {
+        String name = fileEntries[fileIndex];
+        String path = joinPath(fileCwd, name);
+        if (fileEntryDir[fileIndex]) {
+          fileCwd = path;
+          fileIndex = 0;
+          fileScroll = 0;
+          fileScanDir();
+        } else {
+          fileOpenEditor(path);
+        }
+      }
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (fileEditing) {
+    if (!status.word.empty()) {
+      char c = status.word[0];
+      if (keyRepeatAllowed(c, true) && fileEditBuffer.length() < FILE_LINE_MAX) {
+        fileEditBuffer += c;
+      }
+    }
+    if (status.del && keyRepeatAllowed('\b', true)) {
+      if (fileEditBuffer.length() > 0) {
+        fileEditBuffer.remove(fileEditBuffer.length() - 1);
+      }
+    }
+    if (enterPressed || btnA) {
+      fileLines[fileLineIndex] = fileEditBuffer;
+      fileEditing = false;
+      fileDirty = true;
+    }
+    if (escPressedOnce(status)) {
+      fileEditing = false;
+      fileEditBuffer = "";
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (!up && !down) {
+    keyRepeatAllowed(0, false);
+  }
+  if (up && keyRepeatAllowed('U', true)) {
+    int step = accelStep(millis() - repeatStartMs);
+    fileLineIndex = max(0, fileLineIndex - step);
+  } else if (down && keyRepeatAllowed('D', true)) {
+    int step = accelStep(millis() - repeatStartMs);
+    fileLineIndex = min(fileLineCount - 1, fileLineIndex + step);
+  }
+  int listTop = HEADER_HEIGHT + 20;
+  int listBottom = M5Cardputer.Display.height() - FOOTER_HEIGHT - INPUT_AREA_HEIGHT - 4;
+  int lineH = 14;
+  int maxLines = max(1, (listBottom - listTop) / lineH);
+  fileUpdateLineScroll(maxLines);
+
+  if (!status.word.empty()) {
+    char c = status.word[0];
+    if (c == 'n' || c == 'N') {
+      fileInsertLine(fileLineIndex + 1);
+      fileUpdateLineScroll(maxLines);
+    } else if (c == 'd' || c == 'D') {
+      fileDeleteLine(fileLineIndex);
+      fileUpdateLineScroll(maxLines);
+    } else if (c == 's' || c == 'S') {
+      fileSaveEditor();
+    }
+  }
+  if (enterPressed || btnA) {
+    fileEditing = true;
+    fileEditBuffer = fileLines[fileLineIndex];
+  }
+  if (escPressedOnce(status)) {
+    fileUiState = FILE_LIST;
+    fileEditing = false;
+    fileEditBuffer = "";
+    fileScanDir();
+    uiDirty = true;
+    uiBgDirty = true;
+    return;
+  }
+  uiDirty = true;
+}
+
 void handleKeyboardWifi() {
   bool btnA = M5Cardputer.BtnA.wasPressed();
   Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
@@ -2206,8 +3206,13 @@ void handleKeyboardWifi() {
     wifiNavRepeatAllowed(0, false);
   }
   if (wifiCount > 0) {
-    if (up && wifiNavRepeatAllowed('U', true)) wifiIndex = max(0, wifiIndex - 1);
-    else if (down && wifiNavRepeatAllowed('D', true)) wifiIndex = min(wifiCount - 1, wifiIndex + 1);
+    if (up && wifiNavRepeatAllowed('U', true)) {
+      int step = accelStep(millis() - wifiNavStartMs);
+      wifiIndex = max(0, wifiIndex - step);
+    } else if (down && wifiNavRepeatAllowed('D', true)) {
+      int step = accelStep(millis() - wifiNavStartMs);
+      wifiIndex = min(wifiCount - 1, wifiIndex + step);
+    }
   }
   if (!status.word.empty()) {
     char c = status.word[0];
@@ -2248,10 +3253,28 @@ void handleKeyboardAI() {
     if (!up && !down) {
       keyRepeatAllowed(0, false);
     }
-    if (up && keyRepeatAllowed('U', true)) {
-      aiModelIndex = max(0, aiModelIndex - 1);
-    } else if (down && keyRepeatAllowed('D', true)) {
-      aiModelIndex = min(aiModelCount - 1, aiModelIndex + 1);
+    if (aiModelCount <= 0) {
+      aiModelIndex = 0;
+      aiModelScroll = 0;
+    } else {
+      if (up && keyRepeatAllowed('U', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        aiModelIndex = max(0, aiModelIndex - step);
+      } else if (down && keyRepeatAllowed('D', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        aiModelIndex = min(aiModelCount - 1, aiModelIndex + step);
+      }
+      int listTop = HEADER_HEIGHT + 6;
+      int listBottom = M5Cardputer.Display.height() - FOOTER_HEIGHT - 4;
+      int lineH = 16;
+      int maxLines = max(1, (listBottom - listTop) / lineH);
+      if (aiModelIndex < aiModelScroll) {
+        aiModelScroll = aiModelIndex;
+      } else if (aiModelIndex >= aiModelScroll + maxLines) {
+        aiModelScroll = aiModelIndex - maxLines + 1;
+      }
+      int maxScroll = max(0, aiModelCount - maxLines);
+      if (aiModelScroll > maxScroll) aiModelScroll = maxScroll;
     }
     if (!status.word.empty()) {
       char c = status.word[0];
@@ -2290,6 +3313,7 @@ void handleKeyboardAI() {
   }
   if (escPressedOnce(status)) {
     aiUiState = AI_MODELS;
+    aiModelScroll = max(0, aiModelIndex);
     uiDirty = true;
     uiBgDirty = true;
     return;
@@ -2323,6 +3347,8 @@ void loop() {
     handleKeyboardWifi();
   } else if (currentApp == APP_SSH) {
     handleKeyboardSsh();
+  } else if (currentApp == APP_FILES) {
+    handleKeyboardFiles();
   } else {
     handleKeyboardAI();
   }
