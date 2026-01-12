@@ -15,6 +15,8 @@
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
 
+struct Theme;
+
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
 
