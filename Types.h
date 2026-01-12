@@ -1,0 +1,13 @@
+#ifndef TYPES_H
+#define TYPES_H
+
+enum SshState {
+  SSH_IDLE,
+  SSH_CONNECTING,
+  SSH_AWAIT_HOSTKEY,
+  SSH_AUTHING,
+  SSH_AWAIT_PASSWORD,
+  SSH_ACTIVE
+};
+
+#endif

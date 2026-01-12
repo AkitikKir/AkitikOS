@@ -2,6 +2,7 @@
   AkitikOS
 */
 
+#include "Types.h"
 #include <Arduino.h>
 #include "Theme.h"
 #include <SPI.h>
@@ -15,8 +16,6 @@
 #define HAS_SSH 1
 #include <libssh_esp32.h>
 #include <libssh/libssh.h>
-
-enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
