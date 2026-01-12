@@ -24,7 +24,7 @@
 // #include <IRrecv.h>
 // #include <IRutils.h>
 
-// ----------------- Аппаратные пины -----------------
+// -AZZZZZ---------------- Аппаратные пины -----------------
 static const int PIN_SPK = 1;       // DAC1
 static const int PIN_IR_TX = 47;
 static const int PIN_IR_RX = 17;
@@ -1000,7 +1000,7 @@ void cmdNanoStart(const String &pathArg) {
     return;
   }
   inNano = true;
-  printLine("nano: вводите строки, .save или .exit для выхода");
+  printLine("nano: вводите строки, .save или .exit для выход��");
 }
 
 void cmdWifiStatus() {
