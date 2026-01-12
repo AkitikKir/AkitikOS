@@ -12,24 +12,27 @@ jobs:
 
       - name: Setup Arduino CLI
         uses: arduino/setup-arduino-cli@v2
+        with:
+          # Оставляем пустым, чтобы не лезла ошибка "unsupported protocol"
+          additional-urls: "" 
 
       - name: Install ESP32 Platform
         run: |
-          # Удаляем старый конфиг, если он был кривой
-          rm -f /home/runner/.arduino15/arduino-cli.yaml
+          # 1. Полностью сносим папку настроек, где застрял битый URL
+          rm -rf /home/runner/.arduino15
           
-          # Переменная с правильным URL
-          M5_URL="static-cdn.m5stack.com"
+          # 2. Явно инициализируем конфиг с ПРАВИЛЬНЫМ URL
+          arduino-cli config init
+          arduino-cli config set board_manager.additional_urls static-cdn.m5stack.com
           
-          # Обновляем индекс плат
-          arduino-cli core update-index --additional-urls $M5_URL
+          # 3. Обновляем индексы (теперь только из конфига)
+          arduino-cli core update-index
           
-          # Устанавливаем платформу esp32
-          arduino-cli core install esp32:esp32 --additional-urls $M5_URL
+          # 4. Устанавливаем ядро
+          arduino-cli core install esp32:esp32
 
       - name: Install Libraries
         run: |
-          # Установка библиотек для Cardputer
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
@@ -37,8 +40,7 @@ jobs:
       - name: Compile Sketch
         run: |
           mkdir -p ./build
-          # Убедитесь, что ваш .ino файл лежит в папке CardPC (CardPC/CardPC.ino)
-          # Используем FQBN для Cardputer
+          # Компиляция папки CardPC
           arduino-cli compile --fqbn esp32:esp32:m5stack_cardputer --output-dir ./build ./CardPC
 
       - name: Upload Binary
