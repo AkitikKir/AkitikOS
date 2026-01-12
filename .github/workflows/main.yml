@@ -22,7 +22,7 @@ jobs:
           # Initialize Arduino CLI config
           arduino-cli config init
           
-          # Add correct M5Stack package index URL (fixed 404 error)
+          # Add correct M5Stack package index URL
           arduino-cli config add board_manager.additional_urls https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
           
           # Update core index including M5Stack
@@ -40,39 +40,77 @@ jobs:
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
-          # NEW: Add LibSSH-ESP32 library for SSH functionality
+          # Add LibSSH-ESP32 library
           arduino-cli lib install "LibSSH-ESP32"
 
-      - name: Verify Board Details
+      - name: Check Available Partition Schemes
         run: |
-          echo "Checking board properties for M5Stack Cardputer:"
-          # FIXED: Added -b flag before FQBN
-          arduino-cli board details -b m5stack:esp32:m5stack_cardputer | grep -i "partition\|flash\|memory" || echo "Note: Could not find partition details, but continuing..."
+          echo "Checking available partition schemes for M5Cardputer..."
+          # List all build properties to find available partitions
+          arduino-cli compile \
+            --fqbn m5stack:esp32:m5stack_cardputer \
+            --show-properties | grep -i partition || true
+          
+          # Alternative: Check board configuration files
+          echo "Checking for partition CSV files..."
+          find /home/runner/.arduino15/packages/m5stack/hardware/esp32 -name "*.csv" | grep -i partition | head -10
 
-      - name: Compile Sketch with Huge App Partition
+      - name: Compile with Correct Partition Scheme
         run: |
           mkdir -p ./build
           
-          echo "Compiling with Huge App (3MB) partition scheme..."
-          echo "This is REQUIRED because your sketch was 107% of default storage"
+          echo "=== TRY DIFFERENT PARTITION SCHEMES ==="
+          echo "Your sketch size: 1.41MB, needs >1.31MB limit"
           
-          # Compile with huge_app partition scheme to fix "Sketch too big" error
+          # OPTION 1: Try with board options (most reliable)
+          echo "Trying Option 1: Using board options..."
           arduino-cli compile \
-            --fqbn m5stack:esp32:m5stack_cardputer \
-            --build-property "board_build.partitions=huge_app.csv" \
-            --output-dir ./build ./CardPC
+            --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=huge_app \
+            --output-dir ./build ./CardPC && echo "✅ Option 1 SUCCESS" || echo "❌ Option 1 failed"
           
-          # Check if compilation was successful
-          if [ $? -eq 0 ]; then
+          # OPTION 2: If Option 1 fails, try alternative scheme
+          if [ ! -f "./build/*.bin" ]; then
+            echo "Trying Option 2: Alternative partition scheme..."
+            arduino-cli compile \
+              --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=min_spiffs \
+              --output-dir ./build ./CardPC && echo "✅ Option 2 SUCCESS" || echo "❌ Option 2 failed"
+          fi
+          
+          # OPTION 3: Try with build property
+          if [ ! -f "./build/*.bin" ]; then
+            echo "Trying Option 3: With build property..."
+            arduino-cli compile \
+              --fqbn m5stack:esp32:m5stack_cardputer \
+              --build-property "board_build.partitions=huge_app_3MB_no_ota.csv" \
+              --output-dir ./build ./CardPC && echo "✅ Option 3 SUCCESS" || echo "❌ Option 3 failed"
+          fi
+          
+          # OPTION 4: Try default_16MB scheme
+          if [ ! -f "./build/*.bin" ]; then
+            echo "Trying Option 4: default_16MB scheme..."
+            arduino-cli compile \
+              --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=default_16MB \
+              --output-dir ./build ./CardPC && echo "✅ Option 4 SUCCESS" || echo "❌ Option 4 failed"
+          fi
+          
+          # Check if any succeeded
+          if ls ./build/*.bin 1> /dev/null 2>&1; then
             echo "✅ Compilation successful!"
-            echo "Generated files in ./build/:"
+            echo "Generated files:"
             ls -la ./build/
           else
-            echo "❌ Compilation failed"
-            exit 1
+            echo "❌ All partition schemes failed. Trying emergency optimization..."
+            # Last resort: Add compiler optimizations
+            arduino-cli compile \
+              --fqbn m5stack:esp32:m5stack_cardputer \
+              --build-property "compiler.c.extra_flags=-Os" \
+              --build-property "compiler.cpp.extra_flags=-Os" \
+              --build-property "build.extra_flags=-DCORE_DEBUG_LEVEL=0" \
+              --output-dir ./build ./CardPC || (echo "❌ Final attempt failed" && exit 1)
           fi
 
       - name: Upload Binary
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: m5cardputer-firmware
