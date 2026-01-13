@@ -10,6 +10,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_flash.h>
 #include <ctype.h>
 #include <M5Cardputer.h>
 #include <time.h>
@@ -46,6 +47,57 @@ static const int SD_SPI_SCK_PIN = 40;
 static const int SD_SPI_MISO_PIN = 39;
 static const int SD_SPI_MOSI_PIN = 14;
 static const int SD_SPI_CS_PIN = 12;
+
+static const uint8_t PART_DEF_4MB[] = {
+  0xAA, 0x50, 0x01, 0x02, 0x00, 0x90, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00, 0x6E, 0x76, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x00, 0x00, 0xE0, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x6F, 0x74, 0x61, 0x64,
+  0x61, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17, 0x00, 0x74, 0x65, 0x73, 0x74,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x10, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x26, 0x00, 0x61, 0x70, 0x70, 0x30,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x82, 0x00, 0x00, 0x3E, 0x00, 0x00, 0x00, 0x02, 0x00, 0x73, 0x70, 0x69, 0x66,
+  0x66, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xEB, 0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0x4B, 0xF5, 0x09, 0xF6, 0xEB, 0x79, 0xF1, 0x66, 0x5B, 0xDC, 0xCF, 0xB3, 0xFF, 0x0E, 0x6B, 0x99
+};
+
+static const uint8_t PART_DEF_8MB[] = {
+  0xAA, 0x50, 0x01, 0x02, 0x00, 0x90, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x6E, 0x76, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x18, 0x00, 0x61, 0x70, 0x70, 0x30,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x10, 0x00, 0x00, 0x19, 0x00, 0x00, 0x00, 0x4E, 0x00, 0x61, 0x70, 0x70, 0x31,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x81, 0x00, 0x00, 0x67, 0x00, 0x00, 0x00, 0x08, 0x00, 0x76, 0x66, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x82, 0x00, 0x00, 0x6F, 0x00, 0x00, 0x00, 0x10, 0x00, 0x73, 0x70, 0x69, 0x66,
+  0x66, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x03, 0x00, 0x00, 0x7F, 0x00, 0x00, 0x00, 0x01, 0x00, 0x63, 0x6F, 0x72, 0x65,
+  0x64, 0x75, 0x6D, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xEB, 0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0x9C, 0x9E, 0xB3, 0x23, 0x2A, 0x42, 0x20, 0x8E, 0xE9, 0x50, 0xF7, 0xC1, 0x15, 0x7E, 0xEE, 0xED
+};
+
+static const uint8_t PART_DEF_16MB[] = {
+  0xAA, 0x50, 0x01, 0x02, 0x00, 0x90, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x6E, 0x76, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1F, 0x00, 0x61, 0x70, 0x70, 0x30,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x00, 0x10, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x80, 0x00, 0x61, 0x70, 0x70, 0x31,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x81, 0x00, 0x00, 0xA0, 0x00, 0x00, 0x00, 0x10, 0x00, 0x73, 0x79, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x81, 0x00, 0x00, 0xB0, 0x00, 0x00, 0x00, 0x20, 0x00, 0x76, 0x66, 0x73, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x82, 0x00, 0x00, 0xD0, 0x00, 0x00, 0x00, 0x2F, 0x00, 0x73, 0x70, 0x69, 0x66,
+  0x66, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xAA, 0x50, 0x01, 0x03, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x01, 0x00, 0x63, 0x6F, 0x72, 0x65,
+  0x64, 0x75, 0x6D, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xEB, 0xEB, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0x2C, 0x4E, 0x70, 0x13, 0x8D, 0xF3, 0xB0, 0xF7, 0xBF, 0x69, 0x7C, 0xF1, 0x13, 0xDB, 0x36, 0xC1
+};
 
 // ----------------- UI настройки -----------------
 static const int HEADER_HEIGHT = 20;
@@ -138,12 +190,22 @@ bool fileEditing = false;
 String fileEditBuffer;
 bool fileDirty = false;
 
-enum AppsUiState { APPS_MENU, APPS_ONLINE, APPS_SD };
+enum AppsUiState {
+  APPS_MENU,
+  APPS_ONLINE,
+  APPS_ONLINE_ACTION,
+  APPS_SD,
+  APPS_FAVORITES,
+  APPS_SEARCH,
+  APPS_PARTITION
+};
 AppsUiState appsUiState = APPS_MENU;
 int appsIndex = 0;
 static const int APPS_MAX_ENTRIES = 24;
 String appsEntries[APPS_MAX_ENTRIES];
 String appsIds[APPS_MAX_ENTRIES];
+String appsNames[APPS_MAX_ENTRIES];
+static const char *APPS_M5_SERVER_PATH = "https://m5burner-cdn.m5stack.com/firmware/";
 int appsCount = 0;
 int appsListIndex = 0;
 int appsListScroll = 0;
@@ -153,6 +215,30 @@ bool appsInstalling = false;
 static const char *APPS_DIR = "/AkitikOS/apps";
 int appsPage = 1;
 int appsTotalPages = 1;
+int appsActionIndex = 0;
+int appsSelectedIndex = -1;
+bool appsActionFromFavorites = false;
+static const int APPS_MAX_FAVORITES = 24;
+String appsFavEntries[APPS_MAX_FAVORITES];
+String appsFavIds[APPS_MAX_FAVORITES];
+int appsFavCount = 0;
+int appsFavIndex = 0;
+int appsFavScroll = 0;
+static const char *APPS_FAV_PATH = "/AkitikOS/favorites.txt";
+String appsQuery;
+String appsSearchQuery;
+size_t appsMaxApp = 0;
+size_t appsMaxSpiffs = 0;
+bool appsPartitionReady = false;
+
+struct AppsVersionInfo {
+  String file;
+  bool spiffs = false;
+  bool nb = false;
+  size_t appSize = 0;
+  size_t spiffsOffset = 0;
+  size_t spiffsSize = 0;
+};
 
 enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 SshState sshState = SSH_IDLE;
@@ -214,6 +300,7 @@ String wifiPendingSsid;
 String wifiPendingPass;
 String wifiSavedSsid;
 String wifiSavedPass;
+String wifiStatusMsg;
 String aiModelSaved;
 bool sdReady = false;
 bool configDirty = false;
@@ -622,6 +709,63 @@ bool bootAltAppAvailable(const esp_partition_t **outPart) {
   return magic == 0xE9;
 }
 
+bool partitionHasImage(const esp_partition_t *part) {
+  if (!part) return false;
+  uint8_t magic = 0;
+  if (esp_partition_read(part, 0, &magic, 1) != ESP_OK) return false;
+  return magic == 0xE9;
+}
+
+bool copyPartitionTo(const esp_partition_t *src, const esp_partition_t *dst) {
+  if (!src || !dst) return false;
+  if (esp_partition_erase_range(dst, 0, dst->size) != ESP_OK) return false;
+  uint8_t buf[1024];
+  for (size_t offset = 0; offset < dst->size; offset += sizeof(buf)) {
+    size_t readSize = sizeof(buf);
+    if (offset + readSize > dst->size) readSize = dst->size - offset;
+    if (esp_partition_read(src, offset, buf, readSize) != ESP_OK) return false;
+    if (esp_partition_write(dst, offset, buf, readSize) != ESP_OK) return false;
+  }
+  return true;
+}
+
+void appsEnsureLauncherOnTest() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *test =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_TEST, nullptr);
+  if (!running || !test) return;
+  if (running->subtype == ESP_PARTITION_SUBTYPE_APP_TEST) return;
+  if (partitionHasImage(test)) return;
+  drawGradientBackground(THEMES[themeIndex]);
+  drawHeader("AkitikOS");
+  drawFooter("Preparing launcher...");
+  if (!copyPartitionTo(running, test)) return;
+  uint8_t zero = 0x00;
+  esp_partition_write(running, 0, &zero, 1);
+  delay(200);
+  ESP.restart();
+}
+
+void drawBootHoldEsc(int secondsLeft) {
+  const Theme &th = THEMES[themeIndex];
+  drawGradientBackground(th);
+  drawHeader("AkitikOS");
+  int w = M5Cardputer.Display.width();
+  int h = M5Cardputer.Display.height();
+  int boxW = w - 24;
+  int boxH = 46;
+  int boxX = 12;
+  int boxY = (h - boxH) / 2;
+  drawShadowBox(boxX, boxY, boxW, boxH, 8, th.panel, th.shadow);
+  M5Cardputer.Display.drawRoundRect(boxX, boxY, boxW, boxH, 8, th.dim);
+  M5Cardputer.Display.setTextColor(th.fg, th.panel);
+  M5Cardputer.Display.setCursor(boxX + 10, boxY + 10);
+  M5Cardputer.Display.print("Press any key");
+  M5Cardputer.Display.setTextColor(th.dim, th.panel);
+  M5Cardputer.Display.setCursor(boxX + 10, boxY + 24);
+  M5Cardputer.Display.printf("Auto boot in %ds", secondsLeft);
+}
+
 void drawBootScreen(bool hasAltApp, int choice, bool showHint) {
   const Theme &th = THEMES[themeIndex];
   drawGradientBackground(th);
@@ -659,42 +803,39 @@ void drawBootScreen(bool hasAltApp, int choice, bool showHint) {
 }
 
 void bootMaybeSwitchApp() {
-  const esp_partition_t *part = nullptr;
-  bool hasAlt = bootAltAppAvailable(&part);
-  if (!hasAlt) {
+  const esp_partition_t *ota0 =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+  const esp_partition_t *ota1 =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *target = nullptr;
+  if (partitionHasImage(ota0)) target = ota0;
+  else if (partitionHasImage(ota1)) target = ota1;
+  if (!target) {
     drawBootScreen(false, 0, false);
     delay(150);
     return;
   }
-
-  int choice = 0;
   uint32_t start = millis();
-  bool redraw = true;
-  while (millis() - start < 2500) {
+  int lastSeconds = -1;
+  while (millis() - start < 5000) {
     M5Cardputer.update();
     Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
-    bool enterPressed = enterPressedOnce(status) || M5Cardputer.BtnA.wasPressed();
-    bool up = false;
-    bool down = false;
-    bool left = false;
-    bool right = false;
-    readNavArrows(status, up, down, left, right);
-    if ((up || down || left || right) && keyRepeatAllowed('B', true)) {
-      choice = (choice == 0) ? 1 : 0;
-      redraw = true;
+    if (anyKeyPressed(status)) {
+      drawBootHoldEsc(0);
+      delay(100);
+      return;
     }
-    if (redraw) {
-      drawBootScreen(hasAlt, choice, true);
-      redraw = false;
+    int secondsLeft = 5 - (int)((millis() - start) / 1000);
+    if (secondsLeft != lastSeconds) {
+      drawBootHoldEsc(secondsLeft);
+      lastSeconds = secondsLeft;
     }
-    if (enterPressed) break;
     delay(20);
   }
-
-  if (choice == 1 && hasAlt && part) {
-    drawBootScreen(true, 1, false);
-    delay(150);
-    esp_ota_set_boot_partition(part);
+  if (running && running->address == target->address) return;
+  esp_err_t err = esp_ota_set_boot_partition(target);
+  if (err == ESP_OK) {
     ESP.restart();
   }
 }
@@ -832,6 +973,17 @@ bool escPressedOnce(const Keyboard_Class::KeysState &status) {
   bool pressed = escPressed(status) && !escHeld;
   escHeld = escPressed(status);
   return pressed;
+}
+
+bool anyKeyPressed(const Keyboard_Class::KeysState &status) {
+  bool up = false;
+  bool down = false;
+  bool left = false;
+  bool right = false;
+  readNavArrows(status, up, down, left, right);
+  if (status.enter || status.del || !status.word.empty() || up || down || left || right) return true;
+  if (!M5Cardputer.Keyboard.keyList().empty()) return true;
+  return false;
 }
 
 #if defined(__has_include)
@@ -1074,6 +1226,32 @@ void wifiConnectSaved() {
   wifiConnecting = true;
   wifiTargetIndex = -1;
   wifiPendingSave = false;
+}
+
+void appsInitPartitionLimits() {
+  appsMaxApp = 0;
+  appsMaxSpiffs = 0;
+  const esp_partition_t *partition = nullptr;
+  esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_APP,
+                                                   ESP_PARTITION_SUBTYPE_ANY, nullptr);
+  while (it != nullptr) {
+    partition = esp_partition_get(it);
+    if (partition && partition->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) {
+      appsMaxApp = partition->size;
+    }
+    it = esp_partition_next(it);
+  }
+  esp_partition_iterator_release(it);
+
+  it = esp_partition_find(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+  while (it != nullptr) {
+    partition = esp_partition_get(it);
+    if (partition && partition->subtype == ESP_PARTITION_SUBTYPE_DATA_SPIFFS) {
+      appsMaxSpiffs = partition->size;
+    }
+    it = esp_partition_next(it);
+  }
+  esp_partition_iterator_release(it);
 }
 
 void aiClearConsole() {
@@ -1702,6 +1880,7 @@ void appsResetList() {
   for (int i = 0; i < APPS_MAX_ENTRIES; ++i) {
     appsEntries[i] = "";
     appsIds[i] = "";
+    appsNames[i] = "";
   }
 }
 
@@ -1767,6 +1946,44 @@ bool jsonReadStringAt(const String &body, const char *key, int &pos, String &out
   return false;
 }
 
+bool jsonReadIntAt(const String &body, const char *key, int &pos, int &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token, pos);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (i >= (int)body.length()) return false;
+  int start = i;
+  if (body[i] == '-') ++i;
+  while (i < (int)body.length() && isdigit((unsigned char)body[i])) ++i;
+  if (i == start || (i == start + 1 && body[start] == '-')) return false;
+  out = body.substring(start, i).toInt();
+  pos = i;
+  return true;
+}
+
+bool jsonReadBoolAt(const String &body, const char *key, int &pos, bool &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token, pos);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (i >= (int)body.length()) return false;
+  if (body.startsWith("true", i)) {
+    out = true;
+    pos = i + 4;
+    return true;
+  }
+  if (body.startsWith("false", i)) {
+    out = false;
+    pos = i + 5;
+    return true;
+  }
+  return false;
+}
+
 bool appsFetchOnline(int page) {
   appsResetList();
   appsPage = max(1, page);
@@ -1780,6 +1997,9 @@ bool appsFetchOnline(int page) {
   client.setInsecure();
   HTTPClient http;
   String url = "https://api.launcherhub.net/firmwares?category=cardputer&order_by=name&page=" + String(appsPage);
+  if (appsQuery.length()) {
+    url += "&q=" + appsUrlEncode(appsQuery);
+  }
   if (!http.begin(client, url)) {
     appsSetStatus("Fetch failed");
     return false;
@@ -1826,9 +2046,10 @@ bool appsFetchOnline(int page) {
     if (author.length()) label += " - " + author;
     appsEntries[appsCount] = label;
     appsIds[appsCount] = fid;
+    appsNames[appsCount] = name;
     ++appsCount;
   }
-  appsSetStatus(appsCount ? "Enter install" : "No items");
+  appsSetStatus(appsCount ? "Enter download" : "No items");
   return appsCount > 0;
 }
 
@@ -1870,6 +2091,65 @@ bool appsFetchVersionFile(const String &fid, String &outFile) {
     return false;
   }
   outFile = file;
+  return true;
+}
+
+bool appsFetchVersionInfo(const String &fid, AppsVersionInfo &outInfo) {
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  appsSetStatus("Fetching version...");
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.launcherhub.net/firmwares?fid=" + fid;
+  if (!http.begin(client, url)) {
+    appsSetStatus("Fetch failed");
+    return false;
+  }
+  http.setTimeout(8000);
+  int code = http.GET();
+  if (code != 200) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  String body = http.getString();
+  http.end();
+  if (!body.length()) {
+    appsSetStatus("Empty response");
+    return false;
+  }
+  int pos = body.indexOf("\"versions\"");
+  if (pos < 0) {
+    appsSetStatus("No versions");
+    return false;
+  }
+  int start = body.indexOf('{', pos);
+  if (start < 0) {
+    appsSetStatus("No versions");
+    return false;
+  }
+  int end = body.indexOf('}', start);
+  if (end < 0) {
+    appsSetStatus("No versions");
+    return false;
+  }
+  String ver = body.substring(start, end + 1);
+  String file;
+  if (!jsonReadString(ver, "file", file)) {
+    appsSetStatus("No file");
+    return false;
+  }
+  outInfo.file = file;
+  int intVal = 0;
+  bool boolVal = false;
+  if (jsonReadInt(ver, "as", intVal)) outInfo.appSize = (size_t)intVal;
+  if (jsonReadBool(ver, "s", boolVal)) outInfo.spiffs = boolVal;
+  if (jsonReadInt(ver, "so", intVal)) outInfo.spiffsOffset = (size_t)intVal;
+  if (jsonReadInt(ver, "ss", intVal)) outInfo.spiffsSize = (size_t)intVal;
+  if (jsonReadBool(ver, "nb", boolVal)) outInfo.nb = boolVal;
   return true;
 }
 
@@ -1953,34 +2233,341 @@ bool appsInstallStream(Stream &stream, size_t totalSize, WiFiClient *client) {
   return true;
 }
 
+bool appsUpdateStream(Stream &stream, size_t totalSize, int command) {
+  if (totalSize == 0) {
+    appsSetStatus("Size unknown");
+    return false;
+  }
+  if (command == U_FLASH && appsMaxApp > 0 && totalSize > appsMaxApp) {
+    totalSize = appsMaxApp;
+  } else if (command == U_SPIFFS && appsMaxSpiffs > 0 && totalSize > appsMaxSpiffs) {
+    totalSize = appsMaxSpiffs;
+  }
+  if (!Update.begin(totalSize, command)) {
+    appsSetStatus("Update begin failed");
+    return false;
+  }
+  size_t written = 0;
+  uint8_t buf[1024];
+  appsProgress = 0;
+  uint32_t lastDraw = 0;
+  while (written < totalSize) {
+    size_t avail = stream.available();
+    if (!avail) {
+      delay(2);
+      continue;
+    }
+    size_t toRead = min((size_t)sizeof(buf), min(avail, totalSize - written));
+    size_t readBytes = stream.readBytes(buf, toRead);
+    if (readBytes == 0) continue;
+    size_t w = Update.write(buf, readBytes);
+    if (w != readBytes) {
+      Update.end();
+      appsSetStatus("Write failed");
+      return false;
+    }
+    written += w;
+    appsProgress = (int)((written * 100) / totalSize);
+    if (millis() - lastDraw > 80) {
+      drawApps();
+      lastDraw = millis();
+    }
+  }
+  if (!Update.end()) {
+    appsSetStatus("Update end failed");
+    return false;
+  }
+  if (!Update.isFinished()) {
+    appsSetStatus("Update not finished");
+    return false;
+  }
+  return true;
+}
+
+bool appsPerformUpdate(Stream &updateSource, size_t updateSize, int command) {
+  if (updateSize == 0) {
+    appsSetStatus("Size unknown");
+    return false;
+  }
+  if (command == U_FLASH && appsMaxApp > 0 && updateSize > appsMaxApp) {
+    updateSize = appsMaxApp;
+  } else if (command == U_SPIFFS && appsMaxSpiffs > 0 && updateSize > appsMaxSpiffs) {
+    updateSize = appsMaxSpiffs;
+  }
+  Serial.printf("apps:update begin cmd=%d size=%u max_app=%u max_spiffs=%u\n",
+                command, (unsigned)updateSize, (unsigned)appsMaxApp, (unsigned)appsMaxSpiffs);
+  if (!Update.begin(updateSize, command)) {
+    Serial.printf("apps:update begin failed err=%d\n", Update.getError());
+    appsSetStatus("Update begin failed");
+    return false;
+  }
+  size_t written = 0;
+  uint8_t buf[1024];
+  uint32_t lastDraw = 0;
+  while (written < updateSize) {
+    size_t toRead = min((size_t)sizeof(buf), updateSize - written);
+    size_t bytesRead = updateSource.readBytes(buf, toRead);
+    if (bytesRead == 0) {
+      Serial.printf("apps:update read failed written=%u/%u\n",
+                    (unsigned)written, (unsigned)updateSize);
+      Update.end();
+      appsSetStatus("Read failed");
+      return false;
+    }
+    size_t w = Update.write(buf, bytesRead);
+    if (w != bytesRead) {
+      Serial.printf("apps:update write failed w=%u read=%u err=%d\n",
+                    (unsigned)w, (unsigned)bytesRead, Update.getError());
+      Update.end();
+      appsSetStatus("Write failed");
+      return false;
+    }
+    written += w;
+    appsProgress = (int)((written * 100) / updateSize);
+    if (millis() - lastDraw > 80) {
+      drawApps();
+      lastDraw = millis();
+    }
+  }
+  if (!Update.end()) {
+    Serial.printf("apps:update end failed err=%d\n", Update.getError());
+    appsSetStatus("Update end failed");
+    return false;
+  }
+  if (!Update.isFinished()) {
+    Serial.println("apps:update not finished");
+    appsSetStatus("Update not finished");
+    return false;
+  }
+  return true;
+}
+
+bool appsPerformAppUpdate(Stream &updateSource, size_t updateSize) {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *ota0 =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
+  const esp_partition_t *ota1 =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, nullptr);
+  const esp_partition_t *test =
+    esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_TEST, nullptr);
+  const esp_partition_t *part = nullptr;
+  if (running) {
+    Serial.printf("apps:running subtype=%u addr=0x%X\n",
+                  (unsigned)running->subtype, (unsigned)running->address);
+  }
+  if (ota0) {
+    Serial.printf("apps:ota0 addr=0x%X size=%u\n",
+                  (unsigned)ota0->address, (unsigned)ota0->size);
+  }
+  if (ota1) {
+    Serial.printf("apps:ota1 addr=0x%X size=%u\n",
+                  (unsigned)ota1->address, (unsigned)ota1->size);
+  }
+  if (test) {
+    Serial.printf("apps:test addr=0x%X size=%u\n",
+                  (unsigned)test->address, (unsigned)test->size);
+  }
+
+  if (running && ota0 && ota1) {
+    if (running->address == ota0->address) part = ota1;
+    else if (running->address == ota1->address) part = ota0;
+  }
+  if (!part && running && ota0 && test) {
+    if (running->address == ota0->address) part = test;
+    else if (running->address == test->address) part = ota0;
+  }
+  if (!part) {
+    part = esp_ota_get_next_update_partition(nullptr);
+  }
+  if (!part) {
+    part = ota0 ? ota0 : (ota1 ? ota1 : test);
+  }
+  if (running && part && running->address == part->address) {
+    appsSetStatus("No alternate app partition");
+    return false;
+  }
+  if (!part) {
+    appsSetStatus("No OTA partition");
+    return false;
+  }
+  if (updateSize == 0 || updateSize > part->size) {
+    appsSetStatus("Bad size");
+    return false;
+  }
+  Serial.printf("apps:ota write size=%u part=%u subtype=%u\n",
+                (unsigned)updateSize, (unsigned)part->size, (unsigned)part->subtype);
+  size_t eraseSize = (updateSize + 0xFFF) & ~0xFFF;
+  esp_err_t err = esp_partition_erase_range(part, 0, eraseSize);
+  if (err != ESP_OK) {
+    Serial.printf("apps:erase err=%d\n", err);
+    appsSetStatus("Erase failed");
+    return false;
+  }
+  size_t written = 0;
+  uint8_t buf[4096];
+  uint8_t first[16];
+  bool firstSaved = false;
+  uint32_t lastDraw = 0;
+  while (written < updateSize) {
+    size_t toRead = min((size_t)sizeof(buf), updateSize - written);
+    size_t bytesRead = updateSource.readBytes(buf, toRead);
+    if (bytesRead == 0) {
+      appsSetStatus("Read failed");
+      return false;
+    }
+    if (written == 0) {
+      if (buf[0] != 0xE9) {
+        appsSetStatus("Bad image");
+        return false;
+      }
+      memcpy(first, buf, sizeof(first));
+      firstSaved = true;
+      if (bytesRead > sizeof(first)) {
+        err = esp_partition_write(part, sizeof(first), buf + sizeof(first), bytesRead - sizeof(first));
+        if (err != ESP_OK) {
+          Serial.printf("apps:write err=%d\n", err);
+          appsSetStatus("Write failed");
+          return false;
+        }
+      }
+    } else {
+      err = esp_partition_write(part, written, buf, bytesRead);
+      if (err != ESP_OK) {
+        Serial.printf("apps:write err=%d\n", err);
+        appsSetStatus("Write failed");
+        return false;
+      }
+    }
+    written += bytesRead;
+    appsProgress = (int)((written * 100) / updateSize);
+    if (millis() - lastDraw > 80) {
+      drawApps();
+      lastDraw = millis();
+    }
+  }
+  if (firstSaved) {
+    err = esp_partition_write(part, 0, first, sizeof(first));
+    if (err != ESP_OK) {
+      Serial.printf("apps:final write err=%d\n", err);
+      appsSetStatus("Finalize failed");
+      return false;
+    }
+  }
+  esp_err_t bootErr = esp_ota_set_boot_partition(part);
+  if (bootErr != ESP_OK) {
+    Serial.printf("apps:boot set err=%d\n", bootErr);
+  }
+  return true;
+}
+
+bool appsParseFullImage(File &f, size_t fileSize, size_t &appSize,
+                        size_t &spiffsOffset, size_t &spiffsSize, bool &hasSpiffs) {
+  appSize = 0;
+  spiffsOffset = 0;
+  spiffsSize = 0;
+  hasSpiffs = false;
+  for (int i = 0; i < 0x0A0; i += 0x20) {
+    if (!f.seek(0x8000 + i)) return false;
+    uint8_t entry[16];
+    if (f.read(entry, sizeof(entry)) != sizeof(entry)) return false;
+    if ((entry[0x03] == 0x00 || entry[0x03] == 0x10 || entry[0x03] == 0x20) &&
+        entry[0x06] == 0x01) {
+      appSize = ((size_t)entry[0x0A] << 16) | ((size_t)entry[0x0B] << 8) | 0x00;
+      if (fileSize < (appSize + 0x10000) && fileSize > 0x10000) {
+        appSize = fileSize - 0x10000;
+      }
+    }
+    if (entry[0x03] == 0x82) {
+      spiffsOffset = ((size_t)entry[0x06] << 16) | ((size_t)entry[0x07] << 8) | entry[0x08];
+      spiffsSize = ((size_t)entry[0x0A] << 16) | ((size_t)entry[0x0B] << 8) | 0x00;
+      if (fileSize < spiffsOffset) {
+        hasSpiffs = false;
+      } else {
+        hasSpiffs = true;
+      }
+      if (hasSpiffs && fileSize < (spiffsOffset + spiffsSize)) {
+        spiffsSize = fileSize - spiffsOffset;
+      }
+    }
+  }
+  if (appSize == 0) return false;
+  if (fileSize > 0x10000 && appSize > (fileSize - 0x10000)) {
+    appSize = fileSize - 0x10000;
+  }
+  if (hasSpiffs && spiffsOffset + spiffsSize > fileSize) {
+    if (fileSize > spiffsOffset) spiffsSize = fileSize - spiffsOffset;
+  }
+  return true;
+}
+
+bool appsInstallFullImageFromFile(File &f) {
+  size_t appSize = 0;
+  size_t spiffsOffset = 0;
+  size_t spiffsSize = 0;
+  bool hasSpiffs = false;
+  size_t fileSize = f.size();
+  Serial.printf("apps:full image size=%u\n", (unsigned)fileSize);
+  if (!appsParseFullImage(f, fileSize, appSize, spiffsOffset, spiffsSize, hasSpiffs)) {
+    appsSetStatus("Parse failed");
+    return false;
+  }
+  Serial.printf("apps:full image app=%u spiffs=%u off=%u has=%d\n",
+                (unsigned)appSize, (unsigned)spiffsSize, (unsigned)spiffsOffset, hasSpiffs ? 1 : 0);
+
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (!part) {
+    appsSetStatus("No OTA partition");
+    return false;
+  }
+  Serial.printf("apps:ota part size=%u\n", (unsigned)part->size);
+  if (appsMaxApp > 0 && appSize > appsMaxApp) appSize = appsMaxApp;
+  if (appSize > part->size) appSize = part->size;
+
+  appsProgress = 0;
+  appsSetStatus("Installing...");
+  drawApps();
+  if (!f.seek(0x10000)) {
+    appsSetStatus("Seek failed");
+    return false;
+  }
+  if (!appsPerformAppUpdate(f, appSize)) {
+    return false;
+  }
+
+  if (hasSpiffs && spiffsSize > 0) {
+    const esp_partition_t *spiffs = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+    if (spiffs) {
+      Serial.printf("apps:spiffs part size=%u\n", (unsigned)spiffs->size);
+      appsProgress = 0;
+      appsSetStatus("Updating SPIFFS...");
+      drawApps();
+      if (appsMaxSpiffs > 0 && spiffsSize > appsMaxSpiffs) spiffsSize = appsMaxSpiffs;
+      if (spiffsSize > spiffs->size) spiffsSize = spiffs->size;
+      if (!f.seek(spiffsOffset)) {
+        appsSetStatus("Seek failed");
+        return false;
+      }
+      if (!appsPerformUpdate(f, spiffsSize, U_SPIFFS)) {
+        return false;
+      }
+    }
+  }
+
+  appsProgress = 100;
+  appsSetStatus("Install done. Rebooting");
+  drawApps();
+  delay(600);
+  ESP.restart();
+  return true;
+}
+
 bool appsInstallFromUrl(const String &url) {
   String clean = url;
   clean.trim();
   if (WiFi.status() != WL_CONNECTED) {
     appsSetStatus("Wi-Fi not connected");
     return false;
-  }
-  WiFiClientSecure preflight;
-  preflight.setInsecure();
-  HTTPClient pre;
-  if (pre.begin(preflight, clean)) {
-    pre.addHeader("Range", "bytes=32768-32770");
-    pre.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-    pre.useHTTP10(true);
-    int code = pre.GET();
-    if (code == 206) {
-      WiFiClient *s = pre.getStreamPtr();
-      uint8_t buf[3] = {0};
-      if (s && s->available() >= 3) {
-        s->readBytes(buf, 3);
-        if (buf[0] == 0xAA && buf[1] == 0x50 && buf[2] == 0x01) {
-          appsSetStatus("Full image not supported");
-          pre.end();
-          return false;
-        }
-      }
-    }
-    pre.end();
   }
   WiFiClientSecure client;
   client.setInsecure();
@@ -2009,6 +2596,378 @@ bool appsInstallFromUrl(const String &url) {
   return ok;
 }
 
+bool appsInstallFromUrlOffset(const String &url, size_t offset, size_t size, int command) {
+  String clean = url;
+  clean.trim();
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, clean)) {
+    appsSetStatus("Bad URL");
+    return false;
+  }
+  http.addHeader("HWID", WiFi.macAddress());
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+  http.setTimeout(8000);
+  if (offset > 0 && size > 0) {
+    String range = "bytes=" + String(offset) + "-" + String(offset + size - 1);
+    http.addHeader("Range", range);
+  }
+  appsProgress = 0;
+  appsSetStatus("Downloading...");
+  drawApps();
+  int code = http.GET();
+  if (code != 200 && code != 206) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  int len = http.getSize();
+  size_t totalSize = size > 0 ? size : (len > 0 ? (size_t)len : 0);
+  WiFiClient *stream = http.getStreamPtr();
+  if (offset > 0 && code == 200) {
+    size_t skipped = 0;
+    uint8_t buf[512];
+    while (skipped < offset) {
+      size_t avail = stream->available();
+      if (!avail) {
+        delay(2);
+        continue;
+      }
+      size_t toRead = min((size_t)sizeof(buf), min(avail, offset - skipped));
+      int rd = stream->readBytes(buf, toRead);
+      if (rd <= 0) continue;
+      skipped += (size_t)rd;
+    }
+  }
+  bool ok = false;
+  if (command == U_FLASH) {
+    ok = appsPerformAppUpdate(*stream, totalSize);
+  } else {
+    ok = appsUpdateStream(*stream, totalSize, command);
+  }
+  http.end();
+  return ok;
+}
+
+bool appsInstallOnline(const AppsVersionInfo &info, const String &downloadUrl, const String &fileUrl) {
+  size_t appSize = info.appSize;
+  if (appsMaxApp > 0 && appSize > appsMaxApp) appSize = appsMaxApp;
+  if (!info.nb && appSize == 0) {
+    if (appsMaxApp > 0) appSize = appsMaxApp;
+  }
+  if (!info.nb && appSize == 0) {
+    appsSetStatus("No app size");
+    return false;
+  }
+  bool ok = false;
+  if (info.nb) {
+    ok = appsInstallFromUrlOffset(downloadUrl, 0, 0, U_FLASH);
+  } else {
+    ok = appsInstallFromUrlOffset(downloadUrl, 0x10000, appSize, U_FLASH);
+  }
+  if (!ok) return false;
+
+  if (info.spiffs && info.spiffsSize > 0) {
+    size_t spiffsSize = info.spiffsSize;
+    if (appsMaxSpiffs > 0 && spiffsSize > appsMaxSpiffs) spiffsSize = appsMaxSpiffs;
+    appsProgress = 0;
+    appsSetStatus("Updating SPIFFS...");
+    drawApps();
+    ok = appsInstallFromUrlOffset(fileUrl, info.spiffsOffset, spiffsSize, U_SPIFFS);
+    if (!ok) return false;
+  }
+
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (!part) {
+    appsSetStatus("No OTA partition");
+    return false;
+  }
+  esp_ota_set_boot_partition(part);
+  appsProgress = 100;
+  appsSetStatus("Install done. Rebooting");
+  drawApps();
+  delay(600);
+  ESP.restart();
+  return true;
+}
+
+String appsSanitizeName(const String &input) {
+  String out = input;
+  int q = out.indexOf('?');
+  if (q >= 0) out = out.substring(0, q);
+  int h = out.indexOf('#');
+  if (h >= 0) out = out.substring(0, h);
+  const char bad[] = {'/', '\\', '"', '\'', '`'};
+  for (size_t i = 0; i < sizeof(bad); ++i) {
+    out.replace(String(bad[i]), "_");
+  }
+  out.trim();
+  if (!out.length()) return "download";
+  return out;
+}
+
+void appsFavoritesReset() {
+  appsFavCount = 0;
+  appsFavIndex = 0;
+  appsFavScroll = 0;
+  for (int i = 0; i < APPS_MAX_FAVORITES; ++i) {
+    appsFavEntries[i] = "";
+    appsFavIds[i] = "";
+  }
+}
+
+bool appsFavoritesLoad() {
+  appsFavoritesReset();
+  if (!sdReady) return false;
+  if (!SD.exists(APPS_FAV_PATH)) return false;
+  File f = SD.open(APPS_FAV_PATH);
+  if (!f) return false;
+  while (f.available() && appsFavCount < APPS_MAX_FAVORITES) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    int sep = line.indexOf('|');
+    if (sep <= 0) continue;
+    String fid = line.substring(0, sep);
+    String label = line.substring(sep + 1);
+    fid.trim();
+    label.trim();
+    if (!fid.length() || !label.length()) continue;
+    appsFavIds[appsFavCount] = fid;
+    appsFavEntries[appsFavCount] = label;
+    ++appsFavCount;
+  }
+  f.close();
+  return true;
+}
+
+bool appsFavoritesSave() {
+  if (!sdReady) return false;
+  if (!SD.exists(CONFIG_DIR)) SD.mkdir(CONFIG_DIR);
+  if (SD.exists(APPS_FAV_PATH)) SD.remove(APPS_FAV_PATH);
+  File f = SD.open(APPS_FAV_PATH, FILE_WRITE);
+  if (!f) return false;
+  for (int i = 0; i < appsFavCount; ++i) {
+    if (!appsFavIds[i].length()) continue;
+    f.print(appsFavIds[i]);
+    f.print("|");
+    f.println(appsFavEntries[i]);
+  }
+  f.close();
+  return true;
+}
+
+int appsFavoriteIndex(const String &fid) {
+  for (int i = 0; i < appsFavCount; ++i) {
+    if (appsFavIds[i] == fid) return i;
+  }
+  return -1;
+}
+
+bool appsAddFavorite(const String &fid, const String &label) {
+  if (!fid.length() || !label.length()) return false;
+  if (appsFavoriteIndex(fid) >= 0) return false;
+  if (appsFavCount >= APPS_MAX_FAVORITES) return false;
+  appsFavIds[appsFavCount] = fid;
+  appsFavEntries[appsFavCount] = label;
+  ++appsFavCount;
+  return appsFavoritesSave();
+}
+
+bool appsRemoveFavoriteById(const String &fid) {
+  int idx = appsFavoriteIndex(fid);
+  if (idx < 0) return false;
+  for (int i = idx; i + 1 < appsFavCount; ++i) {
+    appsFavIds[i] = appsFavIds[i + 1];
+    appsFavEntries[i] = appsFavEntries[i + 1];
+  }
+  --appsFavCount;
+  if (appsFavIndex >= appsFavCount) appsFavIndex = max(0, appsFavCount - 1);
+  return appsFavoritesSave();
+}
+
+String appsUrlEncode(const String &input) {
+  String out;
+  out.reserve(input.length() + 8);
+  for (int i = 0; i < (int)input.length(); ++i) {
+    char c = input[i];
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out += c;
+    } else if (c == ' ') {
+      out += "%20";
+    } else {
+      char buf[4];
+      snprintf(buf, sizeof(buf), "%%%02X", (unsigned char)c);
+      out += buf;
+    }
+  }
+  return out;
+}
+
+String appsBuildFileUrl(const String &file) {
+  if (file.startsWith("https://")) return file;
+  return String(APPS_M5_SERVER_PATH) + file;
+}
+
+bool appsApplyPartitionScheme(const uint8_t *scheme, size_t schemeSize) {
+  if (!scheme || schemeSize == 0) return false;
+  uint8_t *buffer = (uint8_t *)heap_caps_malloc(4096, MALLOC_CAP_INTERNAL);
+  if (!buffer) return false;
+  memset(buffer, 0xFF, 4096);
+  if (schemeSize > 4096) schemeSize = 4096;
+  memcpy(buffer, scheme, schemeSize);
+  esp_err_t err = esp_flash_erase_region(nullptr, 0x8000, 4096);
+  if (err != ESP_OK) {
+    Serial.printf("partition: erase err=%d\n", err);
+    heap_caps_free(buffer);
+    return false;
+  }
+  err = esp_flash_write(nullptr, buffer, 0x8000, 4096);
+  heap_caps_free(buffer);
+  if (err != ESP_OK) {
+    Serial.printf("partition: write err=%d\n", err);
+    return false;
+  }
+  return true;
+}
+
+bool appsChangePartitionDefault() {
+  uint32_t flashSize = ESP.getFlashChipSize();
+  const uint8_t *scheme = nullptr;
+  size_t schemeSize = 0;
+  if (flashSize <= 0x400000) {
+    scheme = PART_DEF_4MB;
+    schemeSize = sizeof(PART_DEF_4MB);
+  } else if (flashSize <= 0x800000) {
+    scheme = PART_DEF_8MB;
+    schemeSize = sizeof(PART_DEF_8MB);
+  } else {
+    scheme = PART_DEF_16MB;
+    schemeSize = sizeof(PART_DEF_16MB);
+  }
+  return appsApplyPartitionScheme(scheme, schemeSize);
+}
+
+bool appsEnsureAppsDir() {
+  if (!sdReady || SD.totalBytes() == 0) return false;
+  if (SD.exists(APPS_DIR)) return true;
+  return SD.mkdir(APPS_DIR);
+}
+
+bool appsDownloadToFile(HTTPClient &http, const String &destName) {
+  if (!appsEnsureAppsDir()) {
+    appsSetStatus("SD not ready");
+    return false;
+  }
+  String cleanName = appsSanitizeName(destName);
+  if (!cleanName.endsWith(".bin")) cleanName += ".bin";
+  String path = String(APPS_DIR) + "/" + cleanName;
+  if (SD.exists(path)) SD.remove(path);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) {
+    appsSetStatus("Create file failed");
+    return false;
+  }
+  WiFiClient *stream = http.getStreamPtr();
+  int len = http.getSize();
+  size_t totalSize = len > 0 ? (size_t)len : 0;
+  appsProgress = 0;
+  appsSetStatus("Downloading...");
+  drawApps();
+  uint8_t buf[1024];
+  size_t written = 0;
+  uint32_t lastDraw = 0;
+  uint32_t lastData = millis();
+  while (http.connected() && (totalSize == 0 || written < totalSize)) {
+    size_t avail = stream->available();
+    if (!avail) {
+      if (totalSize == 0 && millis() - lastData > 2000) break;
+      delay(2);
+      continue;
+    }
+    int toRead = (int)min((size_t)sizeof(buf), avail);
+    int rd = stream->readBytes(buf, toRead);
+    if (rd <= 0) continue;
+    size_t w = f.write(buf, rd);
+    if (w != (size_t)rd) {
+      f.close();
+      SD.remove(path);
+      appsSetStatus("Write failed");
+      return false;
+    }
+    written += (size_t)rd;
+    lastData = millis();
+    if (totalSize > 0) {
+      appsProgress = (int)((written * 100) / totalSize);
+    }
+    if (millis() - lastDraw > 80) {
+      drawApps();
+      lastDraw = millis();
+    }
+  }
+  f.flush();
+  f.close();
+  if (totalSize > 0 && written != totalSize) {
+    SD.remove(path);
+    appsSetStatus("Download incomplete");
+    return false;
+  }
+  appsProgress = 100;
+  appsSetStatus("Saved to /AkitikOS/apps");
+  return true;
+}
+
+bool appsDownloadFromUrl(const String &url, const String &destName) {
+  String clean = url;
+  clean.trim();
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, clean)) {
+    appsSetStatus("Bad URL");
+    return false;
+  }
+  http.addHeader("HWID", WiFi.macAddress());
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+  http.setTimeout(8000);
+  int code = http.GET();
+  if (code != 200) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  bool ok = appsDownloadToFile(http, destName);
+  http.end();
+  return ok;
+}
+
+bool appsResolveDownload(const String &fid, AppsVersionInfo &info, String &outDownloadUrl,
+                         String &outFileUrl, String &outFileName) {
+  if (!appsFetchVersionInfo(fid, info)) return false;
+  String fileUrl = appsBuildFileUrl(info.file);
+  String downloadUrl = fileUrl;
+  if (fid.length()) {
+    downloadUrl = "https://api.launcherhub.net/download?fid=" + fid + "&file=" + appsUrlEncode(fileUrl);
+  }
+  String fileName = baseNameFromPath(info.file);
+  if (!fileName.length()) fileName = baseNameFromPath(fileUrl);
+  outDownloadUrl = downloadUrl;
+  outFileUrl = fileUrl;
+  outFileName = fileName;
+  return true;
+}
+
 bool appsInstallFromFile(const String &name) {
   String path = String(APPS_DIR) + "/" + name;
   File f = SD.open(path);
@@ -2021,15 +2980,15 @@ bool appsInstallFromFile(const String &name) {
     f.read(sig, 3);
     f.seek(0);
     if (sig[0] == 0xAA && sig[1] == 0x50 && sig[2] == 0x01) {
-      appsSetStatus("Full image not supported");
+      bool ok = appsInstallFullImageFromFile(f);
       f.close();
-      return false;
+      return ok;
     }
   }
   appsProgress = 0;
   appsSetStatus("Installing...");
   drawApps();
-  bool ok = appsInstallStream(f, f.size(), nullptr);
+  bool ok = appsPerformAppUpdate(f, f.size());
   f.close();
   return ok;
 }
@@ -2377,10 +3336,15 @@ void cmdDf() {
 
 void cmdWifiScan() {
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   printLine("Wi-Fi: scanning...");
   int n = WiFi.scanNetworks(false, true);
   if (n <= 0) {
-    printLine("Wi-Fi: нет сетей");
+    if (n < 0) {
+      printLine("Wi-Fi: scan error " + String(n));
+    } else {
+      printLine("Wi-Fi: нет сетей");
+    }
     return;
   }
   for (int i = 0; i < n; ++i) {
@@ -2711,6 +3675,7 @@ void setup() {
   ssh_init();
 #endif
 
+  appsEnsureLauncherOnTest();
   bootMaybeSwitchApp();
 
   consoleX = CONSOLE_MARGIN;
@@ -2739,8 +3704,10 @@ void setup() {
       terminalFont = console.getFont();
     }
   }
+  appsInitPartitionLimits();
   if (sdReady) {
     configLoad();
+    appsFavoritesLoad();
     M5Cardputer.Display.setBrightness(map(brightnessPercent, 0, 100, 0, 255));
     applyTheme();
     wifiConnectSaved();
@@ -2971,7 +3938,8 @@ void drawApps() {
     int lineH = 24;
     int panelX = 6;
     int panelW = M5Cardputer.Display.width() - 12;
-    for (int i = 0; i < 2; ++i) {
+    const char *labels[5] = {"Online", "Favorites", "Search", "SD Card", "Partition"};
+    for (int i = 0; i < 5; ++i) {
       bool active = appsIndex == i;
       uint16_t bg = active ? blend565(th.panel, th.accent, 160) : blend565(th.panel, th.accent, 96);
       drawShadowBox(panelX, y + i * lineH, panelW, lineH - 2, 6, bg, th.shadow);
@@ -2983,15 +3951,15 @@ void drawApps() {
       }
       M5Cardputer.Display.setTextColor(th.fg, bg);
       M5Cardputer.Display.setCursor(panelX + 12, y + i * lineH + 5);
-      if (i == 0) M5Cardputer.Display.print("Online");
-      else M5Cardputer.Display.print("SD Card");
+      M5Cardputer.Display.print(labels[i]);
     }
     drawFooter("Enter open  Esc back");
     return;
   }
 
   if (appsUiState == APPS_ONLINE) {
-    String status = "Online " + String(appsPage) + "/" + String(appsTotalPages);
+    String status = (appsQuery.length() ? "Search " : "Online ");
+    status += String(appsPage) + "/" + String(appsTotalPages);
     drawHeader("Apps", status);
     int w = M5Cardputer.Display.width();
     int h = M5Cardputer.Display.height();
@@ -3030,8 +3998,132 @@ void drawApps() {
     if (appsInstalling) {
       appsDrawProgressBar();
     }
-    String footer = appsStatus.length() ? appsStatus : "Enter install  L/R page  Esc back";
+    String footer = appsStatus.length() ? appsStatus : "Enter action  L/R page  Esc back";
     drawFooter(footer);
+    return;
+  }
+
+  if (appsUiState == APPS_ONLINE_ACTION) {
+    drawHeader("Apps", "Actions");
+    int w = M5Cardputer.Display.width();
+    int h = M5Cardputer.Display.height();
+    int boxW = w - 40;
+    int boxH = 70;
+    int boxX = (w - boxW) / 2;
+    int boxY = (h - boxH) / 2;
+    drawShadowBox(boxX, boxY, boxW, boxH, 8, th.panel, th.shadow);
+    M5Cardputer.Display.drawRoundRect(boxX, boxY, boxW, boxH, 8, th.dim);
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.setCursor(boxX + 10, boxY + 8);
+    M5Cardputer.Display.print("Choose action");
+
+    const char *labels[3] = {"OTA Install", "Download to SD", "Add to Favorite"};
+    bool canDownload = sdReady && SD.totalBytes() > 0;
+    for (int i = 0; i < 3; ++i) {
+      int y = boxY + 24 + i * 18;
+      bool active = appsActionIndex == i;
+      uint16_t bg = active ? blend565(th.panel, th.accent, 160) : th.panel;
+      if (i == 1 && !canDownload) bg = th.bg2;
+      M5Cardputer.Display.fillRoundRect(boxX + 8, y - 2, boxW - 16, 16, 6, bg);
+      if (active) {
+        drawGlowRing(boxX + 8, y - 2, boxW - 16, 16, 6, th);
+        drawActiveMarker(boxX + 12, y + 1, 10, th);
+      }
+      uint16_t color = (i == 1 && !canDownload) ? th.dim : th.fg;
+      M5Cardputer.Display.setTextColor(color, bg);
+      M5Cardputer.Display.setCursor(boxX + 26, y + 2);
+      if (i == 2) {
+        String fid = appsActionFromFavorites && appsSelectedIndex >= 0 && appsSelectedIndex < appsFavCount
+          ? appsFavIds[appsSelectedIndex]
+          : (appsSelectedIndex >= 0 && appsSelectedIndex < appsCount ? appsIds[appsSelectedIndex] : "");
+        bool isFav = fid.length() && appsFavoriteIndex(fid) >= 0;
+        M5Cardputer.Display.print(isFav ? "Remove Favorite" : labels[i]);
+      } else {
+        M5Cardputer.Display.print(labels[i]);
+      }
+    }
+    drawFooter("Enter select  Esc back");
+    return;
+  }
+
+  if (appsUiState == APPS_FAVORITES) {
+    drawHeader("Apps", "Favorites");
+    int w = M5Cardputer.Display.width();
+    int h = M5Cardputer.Display.height();
+    int listTop = HEADER_HEIGHT + 6;
+    int listBottom = h - FOOTER_HEIGHT - 4;
+    int lineH = 16;
+    int maxLines = max(1, (listBottom - listTop) / lineH);
+    M5Cardputer.Display.fillRect(4, listTop - 2, w - 8, listBottom - listTop + 4, th.bg2);
+
+    if (appsFavIndex < appsFavScroll) appsFavScroll = appsFavIndex;
+    if (appsFavIndex >= appsFavScroll + maxLines) appsFavScroll = appsFavIndex - maxLines + 1;
+    int maxScroll = max(0, appsFavCount - maxLines);
+    if (appsFavScroll > maxScroll) appsFavScroll = maxScroll;
+
+    int textX = 18;
+    int textMaxW = w - textX - 12;
+    for (int i = 0; i < maxLines && (appsFavScroll + i) < appsFavCount; ++i) {
+      int idx = appsFavScroll + i;
+      int y = listTop + i * lineH;
+      bool active = idx == appsFavIndex;
+      uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
+      M5Cardputer.Display.fillRoundRect(6, y, w - 12, lineH - 2, 4, bg);
+      if (active) {
+        drawGlowRing(6, y, w - 12, lineH - 2, 4, th);
+        drawActiveMarker(8, y + 2, lineH - 6, th);
+      }
+      M5Cardputer.Display.setTextColor(th.fg, bg);
+      M5Cardputer.Display.setCursor(textX, y + 3);
+      M5Cardputer.Display.print(clampTextToWidth(appsFavEntries[idx], textMaxW));
+    }
+    drawScrollBar(listTop, listBottom, appsFavCount, appsFavScroll, maxLines, th);
+
+    if (appsFavCount == 0) {
+      drawEmptyState(w / 2, (listTop + listBottom) / 2, "No favorites", "Add from Online", th);
+    }
+    drawFooter("Enter action  R reload  Esc back");
+    return;
+  }
+
+  if (appsUiState == APPS_SEARCH) {
+    drawHeader("Apps", "Search");
+    int y = M5Cardputer.Display.height() - INPUT_AREA_HEIGHT;
+    M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), INPUT_AREA_HEIGHT, th.panel);
+    M5Cardputer.Display.fillRect(0, y, M5Cardputer.Display.width(), 1, th.accent);
+    M5Cardputer.Display.setCursor(6, y + 2);
+    M5Cardputer.Display.setTextColor(th.prompt, th.panel);
+    M5Cardputer.Display.print("QUERY ");
+    if (appsSearchQuery.length() == 0) {
+      M5Cardputer.Display.setTextColor(th.dim, th.panel);
+      M5Cardputer.Display.print("type to search");
+    } else {
+      M5Cardputer.Display.setTextColor(th.fg, th.panel);
+      M5Cardputer.Display.print(appsSearchQuery);
+    }
+    drawFooter("Enter search  Del backspace  Esc back");
+    return;
+  }
+
+  if (appsUiState == APPS_PARTITION) {
+    drawHeader("Apps", "Partition");
+    int w = M5Cardputer.Display.width();
+    int h = M5Cardputer.Display.height();
+    int boxW = w - 30;
+    int boxH = 68;
+    int boxX = 15;
+    int boxY = (h - boxH) / 2;
+    drawShadowBox(boxX, boxY, boxW, boxH, 8, th.panel, th.shadow);
+    M5Cardputer.Display.drawRoundRect(boxX, boxY, boxW, boxH, 8, th.dim);
+    M5Cardputer.Display.setTextColor(th.fg, th.panel);
+    M5Cardputer.Display.setCursor(boxX + 8, boxY + 10);
+    M5Cardputer.Display.print("Apply default scheme?");
+    M5Cardputer.Display.setTextColor(th.dim, th.panel);
+    M5Cardputer.Display.setCursor(boxX + 8, boxY + 26);
+    M5Cardputer.Display.print("Will erase flash layout");
+    M5Cardputer.Display.setCursor(boxX + 8, boxY + 42);
+    M5Cardputer.Display.print("Enter apply  Esc back");
+    drawFooter("Default App+VFS+SPIFFS");
     return;
   }
 
@@ -3211,6 +4303,8 @@ void drawWifi() {
     drawFooter("Connecting...");
   } else if (WiFi.status() == WL_CONNECTED) {
     drawFooter("Connected  Esc back  R scan  D disconnect");
+  } else if (wifiStatusMsg.length()) {
+    drawFooter(wifiStatusMsg);
   } else {
     drawFooter("Enter connect  R scan  Esc back");
   }
@@ -3530,10 +4624,22 @@ void wifiStartScan() {
   if (now - wifiLastScanMs < WIFI_SCAN_COOLDOWN_MS) return;
   wifiLastScanMs = now;
   wifiScanning = true;
+  wifiStatusMsg = "";
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.disconnect(true);
+  WiFi.scanDelete();
+  delay(20);
   drawWifiFetching();
 
   int n = WiFi.scanNetworks(false, true);
   wifiCount = 0;
+  if (n < 0) {
+    wifiStatusMsg = "Scan error " + String(n);
+    wifiScanning = false;
+    uiDirty = true;
+    return;
+  }
   for (int i = 0; i < n && wifiCount < WIFI_MAX_NETWORKS; ++i) {
     String s = WiFi.SSID(i);
     s.toCharArray(wifiList[wifiCount].ssid, WIFI_SSID_MAX + 1);
@@ -3771,6 +4877,7 @@ void handleKeyboardHome() {
       appsIndex = 0;
       appsStatus = "";
       appsInstalling = false;
+      appsActionFromFavorites = false;
     }
   }
   if (changed || enterPressed || btnA) {
@@ -4219,9 +5326,9 @@ void handleKeyboardApps() {
 
   if (appsUiState == APPS_MENU) {
     if (up && keyRepeatAllowed('U', true)) {
-      appsIndex = (appsIndex + 1) % 2;
+      appsIndex = (appsIndex + 4) % 5;
     } else if (down && keyRepeatAllowed('D', true)) {
-      appsIndex = (appsIndex + 1) % 2;
+      appsIndex = (appsIndex + 1) % 5;
     }
     if (escPressedOnce(status)) {
       currentApp = APP_HOME;
@@ -4235,9 +5342,17 @@ void handleKeyboardApps() {
       if (appsIndex == 0) {
         appsUiState = APPS_ONLINE;
         appsFetchOnline(1);
-      } else {
+      } else if (appsIndex == 1) {
+        appsFavoritesLoad();
+        appsUiState = APPS_FAVORITES;
+      } else if (appsIndex == 2) {
+        appsSearchQuery = appsQuery;
+        appsUiState = APPS_SEARCH;
+      } else if (appsIndex == 3) {
         appsUiState = APPS_SD;
         appsScanSd();
+      } else {
+        appsUiState = APPS_PARTITION;
       }
       uiDirty = true;
       uiBgDirty = true;
@@ -4279,17 +5394,170 @@ void handleKeyboardApps() {
       if (c == 'r' || c == 'R') appsFetchOnline(appsPage);
     }
     if ((enterPressed || btnA) && appsCount > 0) {
-      appsInstalling = true;
+      appsSelectedIndex = appsListIndex;
+      appsActionIndex = 0;
+      appsActionFromFavorites = false;
+      appsUiState = APPS_ONLINE_ACTION;
       uiDirty = true;
       uiBgDirty = true;
-      String file;
-      bool ok = appsFetchVersionFile(appsIds[appsListIndex], file);
-      if (ok) {
-        String fileAddr = "https://api.launcherhub.net/download?fid=" + appsIds[appsListIndex] + "&file=" + file;
-        ok = appsInstallFromUrl(fileAddr);
+      return;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (appsUiState == APPS_ONLINE_ACTION) {
+    if (escPressedOnce(status)) {
+      appsUiState = APPS_ONLINE;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (up && keyRepeatAllowed('U', true)) {
+      appsActionIndex = (appsActionIndex + 2) % 3;
+    } else if (down && keyRepeatAllowed('D', true)) {
+      appsActionIndex = (appsActionIndex + 1) % 3;
+    }
+    if (enterPressed || btnA) {
+      int selectedCount = appsActionFromFavorites ? appsFavCount : appsCount;
+      if (appsSelectedIndex >= 0 && appsSelectedIndex < selectedCount) {
+        appsInstalling = true;
+        uiDirty = true;
+        uiBgDirty = true;
+        String fid = appsActionFromFavorites ? appsFavIds[appsSelectedIndex] : appsIds[appsSelectedIndex];
+        String label = appsActionFromFavorites ? appsFavEntries[appsSelectedIndex] : appsEntries[appsSelectedIndex];
+        AppsVersionInfo info;
+        String downloadUrl;
+        String fileUrl;
+        String fileName;
+        bool ok = true;
+        if (appsActionIndex == 2) {
+          int favIdx = appsFavoriteIndex(fid);
+          if (favIdx >= 0) {
+            ok = appsRemoveFavoriteById(fid);
+            appsStatus = ok ? "Favorite removed" : "Remove failed";
+          } else {
+            ok = appsAddFavorite(fid, label);
+            appsStatus = ok ? "Favorite added" : "Add failed";
+          }
+          if (appsActionFromFavorites) {
+            appsFavoritesLoad();
+          }
+        } else {
+          ok = appsResolveDownload(fid, info, downloadUrl, fileUrl, fileName);
+          if (ok) {
+            if (appsActionIndex == 0) {
+              ok = appsInstallOnline(info, downloadUrl, fileUrl);
+            } else {
+              if (!fileName.length()) fileName = label;
+              if (!sdReady || SD.totalBytes() == 0) {
+                ok = false;
+                appsStatus = "SD not ready";
+              } else {
+                ok = appsDownloadFromUrl(downloadUrl, fileName);
+              }
+            }
+          }
+        }
+        appsInstalling = false;
+        if (!ok) uiDirty = true;
       }
-      appsInstalling = false;
-      if (!ok) uiDirty = true;
+      appsUiState = appsActionFromFavorites ? APPS_FAVORITES : APPS_ONLINE;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (appsUiState == APPS_FAVORITES) {
+    if (escPressedOnce(status)) {
+      appsUiState = APPS_MENU;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (!up && !down) {
+      keyRepeatAllowed(0, false);
+    }
+    if (appsFavCount > 0) {
+      if (up && keyRepeatAllowed('U', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        appsFavIndex = max(0, appsFavIndex - step);
+      } else if (down && keyRepeatAllowed('D', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        appsFavIndex = min(appsFavCount - 1, appsFavIndex + step);
+      }
+    }
+    if (!status.word.empty()) {
+      char c = status.word[0];
+      if (c == 'r' || c == 'R') appsFavoritesLoad();
+    }
+    if ((enterPressed || btnA) && appsFavCount > 0) {
+      appsSelectedIndex = appsFavIndex;
+      appsActionIndex = 0;
+      appsActionFromFavorites = true;
+      appsUiState = APPS_ONLINE_ACTION;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (appsUiState == APPS_SEARCH) {
+    if (escPressedOnce(status)) {
+      appsUiState = APPS_MENU;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (!status.word.empty()) {
+      char c = status.word[0];
+      if (keyRepeatAllowed(c, true) && appsSearchQuery.length() < 32) {
+        appsSearchQuery += c;
+      }
+    }
+    if (status.del && keyRepeatAllowed('\b', true)) {
+      if (appsSearchQuery.length() > 0) {
+        appsSearchQuery.remove(appsSearchQuery.length() - 1);
+      }
+    }
+    if (enterPressed || btnA) {
+      appsQuery = appsSearchQuery;
+      appsUiState = APPS_ONLINE;
+      appsFetchOnline(1);
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (appsUiState == APPS_PARTITION) {
+    if (escPressedOnce(status)) {
+      appsUiState = APPS_MENU;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (enterPressed || btnA) {
+      appsSetStatus("Applying...");
+      drawApps();
+      bool ok = appsChangePartitionDefault();
+      if (ok) {
+        appsSetStatus("Rebooting...");
+        drawApps();
+        delay(300);
+        ESP.restart();
+      } else {
+        appsSetStatus("Partition failed");
+        uiDirty = true;
+      }
+      return;
     }
     uiDirty = true;
     return;
