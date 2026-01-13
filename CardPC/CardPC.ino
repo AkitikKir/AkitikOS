@@ -622,52 +622,78 @@ bool bootAltAppAvailable(const esp_partition_t **outPart) {
   return magic == 0xE9;
 }
 
-void drawBootScreen(bool forceAkitik, bool hasAltApp) {
+void drawBootScreen(bool hasAltApp, int choice, bool showHint) {
   const Theme &th = THEMES[themeIndex];
   drawGradientBackground(th);
   M5Cardputer.Display.setTextColor(th.fg, th.bg);
-  M5Cardputer.Display.setCursor(10, 18);
+  M5Cardputer.Display.setCursor(10, 12);
   M5Cardputer.Display.print("AkitikOS Boot");
-  M5Cardputer.Display.setTextColor(th.dim, th.bg);
-  M5Cardputer.Display.setCursor(10, 36);
-  if (hasAltApp) {
-    M5Cardputer.Display.print("Hold A for AkitikOS");
-  } else {
-    M5Cardputer.Display.print("No app installed");
+
+  int w = M5Cardputer.Display.width();
+  int boxW = w - 20;
+  int boxH = 18;
+  int startY = 34;
+  for (int i = 0; i < 2; ++i) {
+    uint16_t bg = (choice == i) ? blend565(th.panel, th.accent, 170) : blend565(th.panel, th.accent, 96);
+    int y = startY + i * (boxH + 8);
+    drawShadowBox(10, y, boxW, boxH, 6, bg, th.shadow);
+    M5Cardputer.Display.drawRoundRect(10, y, boxW, boxH, 6, th.dim);
+    if (choice == i) {
+      drawGlowRing(10, y, boxW, boxH, 6, th);
+      drawFocusRing(12, y + 2, boxW - 4, boxH - 4, 5, th.accent);
+    }
+    M5Cardputer.Display.setTextColor(th.fg, bg);
+    M5Cardputer.Display.setCursor(18, y + 5);
+    if (i == 0) {
+      M5Cardputer.Display.print("AkitikOS");
+    } else {
+      M5Cardputer.Display.print(hasAltApp ? "Other App" : "Other App (none)");
+    }
   }
-  M5Cardputer.Display.setTextColor(th.fg, th.bg);
-  M5Cardputer.Display.setCursor(10, 56);
-  if (forceAkitik || !hasAltApp) {
-    M5Cardputer.Display.print("Starting AkitikOS");
-  } else {
-    M5Cardputer.Display.print("Starting installed app");
+
+  if (showHint) {
+    M5Cardputer.Display.setTextColor(th.dim, th.bg);
+    M5Cardputer.Display.setCursor(10, startY + 2 * (boxH + 8) + 6);
+    M5Cardputer.Display.print("Arrows select, Enter confirm");
   }
-  M5Cardputer.Display.setTextColor(th.dim, th.bg);
-  M5Cardputer.Display.setCursor(10, 76);
-  M5Cardputer.Display.print("Release to boot other app");
 }
 
 void bootMaybeSwitchApp() {
   const esp_partition_t *part = nullptr;
   bool hasAlt = bootAltAppAvailable(&part);
-  bool forceAkitik = false;
+  if (!hasAlt) {
+    drawBootScreen(false, 0, false);
+    delay(150);
+    return;
+  }
+
+  int choice = 0;
   uint32_t start = millis();
-  bool lastForce = false;
-  bool lastHasAlt = !hasAlt;
-  while (millis() - start < 900) {
+  bool redraw = true;
+  while (millis() - start < 2500) {
     M5Cardputer.update();
-    forceAkitik = M5Cardputer.BtnA.isPressed();
-    if (forceAkitik != lastForce || hasAlt != lastHasAlt) {
-      drawBootScreen(forceAkitik, hasAlt);
-      lastForce = forceAkitik;
-      lastHasAlt = hasAlt;
+    Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+    bool enterPressed = enterPressedOnce(status) || M5Cardputer.BtnA.wasPressed();
+    bool up = false;
+    bool down = false;
+    bool left = false;
+    bool right = false;
+    readNavArrows(status, up, down, left, right);
+    if ((up || down || left || right) && keyRepeatAllowed('B', true)) {
+      choice = (choice == 0) ? 1 : 0;
+      redraw = true;
     }
-    if (forceAkitik) break;
+    if (redraw) {
+      drawBootScreen(hasAlt, choice, true);
+      redraw = false;
+    }
+    if (enterPressed) break;
     delay(20);
   }
-  if (!forceAkitik && hasAlt && part) {
-    drawBootScreen(false, true);
-    delay(120);
+
+  if (choice == 1 && hasAlt && part) {
+    drawBootScreen(true, 1, false);
+    delay(150);
     esp_ota_set_boot_partition(part);
     ESP.restart();
   }
