@@ -8,6 +8,9 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
+#include <ctype.h>
 #include <M5Cardputer.h>
 #include <time.h>
 #include <lgfx/v1/lgfx_fonts.hpp>
@@ -59,7 +62,7 @@ String inputLine;
 
 M5Canvas console(&M5Cardputer.Display);
 
-enum AppId { APP_HOME, APP_TERMINAL, APP_SETTINGS, APP_NETWORK, APP_WIFI, APP_WIFI_PASS, APP_SSH, APP_FILES, APP_AI };
+enum AppId { APP_HOME, APP_TERMINAL, APP_SETTINGS, APP_NETWORK, APP_WIFI, APP_WIFI_PASS, APP_SSH, APP_FILES, APP_APPS, APP_AI };
 AppId currentApp = APP_HOME;
 bool uiDirty = true;
 bool uiBgDirty = true;
@@ -91,6 +94,8 @@ static const uint8_t KEY_RAW_ARROW_DOWN = 0x2E;
 static const uint8_t KEY_RAW_ARROW_LEFT = 0x2C;
 static const uint8_t KEY_RAW_ARROW_RIGHT = 0x2F;
 static const bool DEBUG_KEYCODES = true;
+static const char *CONFIG_DIR = "/AkitikOS";
+static const char *CONFIG_PATH = "/AkitikOS/config.json";
 bool enterHeld = false;
 bool escHeld = false;
 String sshUiHost;
@@ -132,6 +137,22 @@ int fileLineScroll = 0;
 bool fileEditing = false;
 String fileEditBuffer;
 bool fileDirty = false;
+
+enum AppsUiState { APPS_MENU, APPS_ONLINE, APPS_SD };
+AppsUiState appsUiState = APPS_MENU;
+int appsIndex = 0;
+static const int APPS_MAX_ENTRIES = 24;
+String appsEntries[APPS_MAX_ENTRIES];
+String appsIds[APPS_MAX_ENTRIES];
+int appsCount = 0;
+int appsListIndex = 0;
+int appsListScroll = 0;
+String appsStatus;
+int appsProgress = -1;
+bool appsInstalling = false;
+static const char *APPS_DIR = "/AkitikOS/apps";
+int appsPage = 1;
+int appsTotalPages = 1;
 
 enum SshState { SSH_IDLE, SSH_CONNECTING, SSH_AWAIT_HOSTKEY, SSH_AUTHING, SSH_AWAIT_PASSWORD, SSH_ACTIVE };
 SshState sshState = SSH_IDLE;
@@ -188,6 +209,22 @@ uint32_t wifiLastScanMs = 0;
 char wifiPass[WIFI_PASS_MAX + 1];
 size_t wifiPassLen = 0;
 int wifiTargetIndex = -1;
+bool wifiPendingSave = false;
+String wifiPendingSsid;
+String wifiPendingPass;
+String wifiSavedSsid;
+String wifiSavedPass;
+String aiModelSaved;
+bool sdReady = false;
+bool configDirty = false;
+uint32_t configDirtyAtMs = 0;
+static const uint32_t CONFIG_SAVE_DELAY_MS = 600;
+static const int TERM_MAX_LINES = 200;
+String termLines[TERM_MAX_LINES];
+uint16_t termColors[TERM_MAX_LINES];
+int termHead = 0;
+int termCount = 0;
+int termScroll = 0;
 
 enum WifiUiState { WIFI_LIST, WIFI_INPUT, WIFI_STATUS };
 WifiUiState wifiUiState = WIFI_LIST;
@@ -240,10 +277,60 @@ void serialPrintPrompt() {
   Serial.print("> ");
 }
 
+int termVisibleLines() {
+  int lineH = console.fontHeight();
+  if (lineH <= 0) lineH = 12;
+  return max(1, consoleH / lineH);
+}
+
+int termMaxScroll() {
+  return max(0, termCount - termVisibleLines());
+}
+
+void termPushLine(const String &s, uint16_t color) {
+  bool wasAtBottom = (termScroll == 0);
+  int idx = (termHead + termCount) % TERM_MAX_LINES;
+  if (termCount < TERM_MAX_LINES) {
+    termLines[idx] = s;
+    termColors[idx] = color;
+    ++termCount;
+  } else {
+    termLines[termHead] = s;
+    termColors[termHead] = color;
+    termHead = (termHead + 1) % TERM_MAX_LINES;
+  }
+  if (!wasAtBottom) {
+    termScroll = min(termScroll + 1, termMaxScroll());
+  }
+}
+
+void termRedraw() {
+  const Theme &th = THEMES[themeIndex];
+  termScroll = min(termScroll, termMaxScroll());
+  console.fillSprite(th.bg2);
+  console.setCursor(0, 0);
+  int visible = termVisibleLines();
+  int start = max(0, termCount - visible - termScroll);
+  for (int i = 0; i < visible; ++i) {
+    int idx = start + i;
+    if (idx >= termCount) break;
+    int ring = (termHead + idx) % TERM_MAX_LINES;
+    uint16_t color = termColors[ring] == 0 ? th.fg : termColors[ring];
+    console.setTextColor(color, th.bg2);
+    console.println(termLines[ring]);
+  }
+  console.pushSprite(consoleX, consoleY);
+}
+
 void printLine(const String &s, uint16_t color = 0) {
   Serial.println(s);
   if (currentApp == APP_TERMINAL) {
-    tftPrintLn(s, color);
+    termPushLine(s, color);
+    if (termScroll == 0) {
+      tftPrintLn(s, color);
+    } else {
+      termRedraw();
+    }
   }
 }
 
@@ -526,6 +613,66 @@ void drawGradientBackground(const Theme &th) {
   }
 }
 
+bool bootAltAppAvailable(const esp_partition_t **outPart) {
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (!part) return false;
+  uint8_t magic = 0;
+  if (esp_partition_read(part, 0, &magic, 1) != ESP_OK) return false;
+  if (outPart) *outPart = part;
+  return magic == 0xE9;
+}
+
+void drawBootScreen(bool forceAkitik, bool hasAltApp) {
+  const Theme &th = THEMES[themeIndex];
+  drawGradientBackground(th);
+  M5Cardputer.Display.setTextColor(th.fg, th.bg);
+  M5Cardputer.Display.setCursor(10, 18);
+  M5Cardputer.Display.print("AkitikOS Boot");
+  M5Cardputer.Display.setTextColor(th.dim, th.bg);
+  M5Cardputer.Display.setCursor(10, 36);
+  if (hasAltApp) {
+    M5Cardputer.Display.print("Hold A for AkitikOS");
+  } else {
+    M5Cardputer.Display.print("No app installed");
+  }
+  M5Cardputer.Display.setTextColor(th.fg, th.bg);
+  M5Cardputer.Display.setCursor(10, 56);
+  if (forceAkitik || !hasAltApp) {
+    M5Cardputer.Display.print("Starting AkitikOS");
+  } else {
+    M5Cardputer.Display.print("Starting installed app");
+  }
+  M5Cardputer.Display.setTextColor(th.dim, th.bg);
+  M5Cardputer.Display.setCursor(10, 76);
+  M5Cardputer.Display.print("Release to boot other app");
+}
+
+void bootMaybeSwitchApp() {
+  const esp_partition_t *part = nullptr;
+  bool hasAlt = bootAltAppAvailable(&part);
+  bool forceAkitik = false;
+  uint32_t start = millis();
+  bool lastForce = false;
+  bool lastHasAlt = !hasAlt;
+  while (millis() - start < 900) {
+    M5Cardputer.update();
+    forceAkitik = M5Cardputer.BtnA.isPressed();
+    if (forceAkitik != lastForce || hasAlt != lastHasAlt) {
+      drawBootScreen(forceAkitik, hasAlt);
+      lastForce = forceAkitik;
+      lastHasAlt = hasAlt;
+    }
+    if (forceAkitik) break;
+    delay(20);
+  }
+  if (!forceAkitik && hasAlt && part) {
+    drawBootScreen(false, true);
+    delay(120);
+    esp_ota_set_boot_partition(part);
+    ESP.restart();
+  }
+}
+
 void drawShadowBox(int x, int y, int w, int h, int r, uint16_t fill, uint16_t shadow) {
   M5Cardputer.Display.fillRoundRect(x + 2, y + 2, w, h, r, shadow);
   M5Cardputer.Display.fillRoundRect(x, y, w, h, r, fill);
@@ -702,6 +849,207 @@ String aiEscapeJson(const String &s) {
   return out;
 }
 
+String jsonEscape(const String &s) {
+  String out;
+  out.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); ++i) {
+    char c = s[i];
+    if (c == '\\') out += "\\\\";
+    else if (c == '"') out += "\\\"";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else out += c;
+  }
+  return out;
+}
+
+int jsonSkipSpaces(const String &body, int idx) {
+  while (idx < (int)body.length() && isspace((unsigned char)body[idx])) ++idx;
+  return idx;
+}
+
+bool jsonReadString(const String &body, const char *key, String &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (i >= (int)body.length() || body[i] != '"') return false;
+  ++i;
+  String val;
+  val.reserve(32);
+  while (i < (int)body.length()) {
+    char c = body[i++];
+    if (c == '\\') {
+      if (i >= (int)body.length()) break;
+      char esc = body[i++];
+      if (esc == 'n') val += '\n';
+      else if (esc == 'r') val += '\r';
+      else if (esc == 't') val += '\t';
+      else val += esc;
+      continue;
+    }
+    if (c == '"') {
+      out = val;
+      return true;
+    }
+    val += c;
+  }
+  return false;
+}
+
+bool jsonReadInt(const String &body, const char *key, int &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (i >= (int)body.length()) return false;
+  int start = i;
+  if (body[i] == '-') ++i;
+  while (i < (int)body.length() && isdigit((unsigned char)body[i])) ++i;
+  if (i == start || (i == start + 1 && body[start] == '-')) return false;
+  out = body.substring(start, i).toInt();
+  return true;
+}
+
+bool jsonReadBool(const String &body, const char *key, bool &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (body.startsWith("true", i)) {
+    out = true;
+    return true;
+  }
+  if (body.startsWith("false", i)) {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
+void configMarkDirty() {
+  configDirty = true;
+  configDirtyAtMs = millis();
+}
+
+bool configSave() {
+  if (!sdReady) return false;
+  if (!SD.exists(CONFIG_DIR)) SD.mkdir(CONFIG_DIR);
+  if (SD.exists(CONFIG_PATH)) SD.remove(CONFIG_PATH);
+  File f = SD.open(CONFIG_PATH, FILE_WRITE);
+  if (!f) return false;
+  String model = aiModelSaved.length() ? aiModelSaved : aiModel;
+  int port = sshUiPort.toInt();
+  if (port <= 0) port = sshPort > 0 ? sshPort : 22;
+  f.println("{");
+  f.println("  \"version\": 1,");
+  f.print("  \"brightness\": ");
+  f.print(brightnessPercent);
+  f.println(",");
+  f.print("  \"theme\": ");
+  f.print(themeIndex);
+  f.println(",");
+  f.print("  \"sound\": ");
+  f.print(soundEnabled ? "true" : "false");
+  f.println(",");
+  f.print("  \"wifiSsid\": \"");
+  f.print(jsonEscape(wifiSavedSsid));
+  f.println("\",");
+  f.print("  \"wifiPass\": \"");
+  f.print(jsonEscape(wifiSavedPass));
+  f.println("\",");
+  f.print("  \"sshHost\": \"");
+  f.print(jsonEscape(sshUiHost));
+  f.println("\",");
+  f.print("  \"sshUser\": \"");
+  f.print(jsonEscape(sshUiUser));
+  f.println("\",");
+  f.print("  \"sshPort\": ");
+  f.print(port);
+  f.println(",");
+  f.print("  \"sshPass\": \"");
+  f.print(jsonEscape(sshUiPass));
+  f.println("\",");
+  f.print("  \"aiModel\": \"");
+  f.print(jsonEscape(model));
+  f.println("\"");
+  f.println("}");
+  f.close();
+  return true;
+}
+
+bool configLoad() {
+  if (!sdReady) return false;
+  if (!SD.exists(CONFIG_PATH)) {
+    configSave();
+    return false;
+  }
+  File f = SD.open(CONFIG_PATH);
+  if (!f) return false;
+  String body = f.readString();
+  f.close();
+  if (!body.length()) return false;
+
+  int intVal = 0;
+  bool boolVal = false;
+  String strVal;
+  if (jsonReadInt(body, "brightness", intVal)) {
+    brightnessPercent = max(0, min(100, intVal));
+  }
+  if (jsonReadInt(body, "theme", intVal)) {
+    themeIndex = max(0, min(THEME_COUNT - 1, intVal));
+  }
+  if (jsonReadBool(body, "sound", boolVal)) {
+    soundEnabled = boolVal;
+  }
+  if (jsonReadString(body, "wifiSsid", strVal)) wifiSavedSsid = strVal;
+  if (jsonReadString(body, "wifiPass", strVal)) wifiSavedPass = strVal;
+  if (jsonReadString(body, "sshHost", strVal)) sshUiHost = strVal;
+  if (jsonReadString(body, "sshUser", strVal)) sshUiUser = strVal;
+  if (jsonReadInt(body, "sshPort", intVal)) {
+    if (intVal > 0 && intVal < 65536) {
+      sshPort = intVal;
+      sshUiPort = String(intVal);
+    }
+  }
+  if (jsonReadString(body, "sshPass", strVal)) sshUiPass = strVal;
+  if (jsonReadString(body, "aiModel", strVal)) {
+    aiModelSaved = strVal;
+    if (aiModelSaved.length()) aiModel = aiModelSaved;
+  }
+  return true;
+}
+
+void configPollSave() {
+  if (!configDirty || !sdReady) return;
+  if (millis() - configDirtyAtMs < CONFIG_SAVE_DELAY_MS) return;
+  if (configSave()) {
+    configDirty = false;
+  } else {
+    configDirtyAtMs = millis();
+  }
+}
+
+void wifiConnectSaved() {
+  if (!wifiSavedSsid.length()) return;
+  WiFi.mode(WIFI_STA);
+  if (wifiSavedPass.length()) {
+    WiFi.begin(wifiSavedSsid.c_str(), wifiSavedPass.c_str());
+  } else {
+    WiFi.begin(wifiSavedSsid.c_str());
+  }
+  wifiConnecting = true;
+  wifiTargetIndex = -1;
+  wifiPendingSave = false;
+}
+
 void aiClearConsole() {
   const Theme &th = THEMES[themeIndex];
   console.fillSprite(th.bg2);
@@ -789,10 +1137,22 @@ bool aiFetchModels() {
     aiErrorUntil = millis() + 2000;
     return false;
   }
+  if (aiModelSaved.length()) {
+    for (int i = 0; i < aiModelCount; ++i) {
+      if (aiModels[i] == aiModelSaved) {
+        aiModelIndex = i;
+        break;
+      }
+    }
+  }
   if (aiModelIndex >= aiModelCount) aiModelIndex = 0;
   if (aiModelIndex < 0) aiModelIndex = 0;
   aiModelScroll = 0;
   aiModel = aiModels[aiModelIndex];
+  if (aiModelSaved.length() && aiModelSaved != aiModel) {
+    aiModelSaved = aiModel;
+    configMarkDirty();
+  }
   return true;
 }
 
@@ -1158,6 +1518,17 @@ void drawIconFolder(int x, int y, uint16_t bg, const Theme &th) {
   M5Cardputer.Display.drawRoundRect(x + 4, y + 3, 8, 4, 2, frame);
 }
 
+void drawIconApps(int x, int y, uint16_t bg, const Theme &th) {
+  uint16_t frame = th.fg;
+  uint16_t fill = blend565(bg, th.panel, 160);
+  M5Cardputer.Display.drawRoundRect(x + 3, y + 3, 14, 8, 2, frame);
+  M5Cardputer.Display.fillRoundRect(x + 4, y + 4, 12, 6, 2, fill);
+  M5Cardputer.Display.drawRoundRect(x + 1, y + 6, 14, 8, 2, frame);
+  M5Cardputer.Display.fillRoundRect(x + 2, y + 7, 12, 6, 2, fill);
+  M5Cardputer.Display.drawPixel(x + 14, y + 2, frame);
+  M5Cardputer.Display.drawPixel(x + 16, y + 2, frame);
+}
+
 void drawTileBadge(int x, int y, const String &text, uint16_t color, const Theme &th) {
   if (!text.length()) return;
   int w = M5Cardputer.Display.textWidth(text) + 8;
@@ -1198,6 +1569,8 @@ void drawTile(int x, int y, int w, int h, const String &title, const String &sub
     drawIconSettings(iconX, iconY, tile, th);
   } else if (title == "Files") {
     drawIconFolder(iconX, iconY, tile, th);
+  } else if (title == "Apps") {
+    drawIconApps(iconX, iconY, tile, th);
   } else if (title == "Wi-Fi" || title == "Network") {
     drawIconWifi(iconX, iconY, tile, th);
   } else {
@@ -1280,12 +1653,325 @@ void clearScreen() {
     drawShadowBox(consoleX - 2, consoleY - 2, consoleW + 4, consoleH + 4, 6, th.panel, th.shadow);
   }
   console.fillSprite(th.bg2);
+  termHead = 0;
+  termCount = 0;
+  termScroll = 0;
   if (currentApp == APP_TERMINAL) {
     console.pushSprite(consoleX, consoleY);
   }
   Serial.println();
   Serial.println();
   renderInputLine();
+}
+
+void appsSetStatus(const String &msg) {
+  appsStatus = msg;
+  uiDirty = true;
+}
+
+void appsResetList() {
+  appsCount = 0;
+  appsListIndex = 0;
+  appsListScroll = 0;
+  for (int i = 0; i < APPS_MAX_ENTRIES; ++i) {
+    appsEntries[i] = "";
+    appsIds[i] = "";
+  }
+}
+
+void appsScanSd() {
+  appsResetList();
+  if (SD.totalBytes() == 0) {
+    appsSetStatus("SD not ready");
+    return;
+  }
+  if (!SD.exists(APPS_DIR)) {
+    appsSetStatus("Create /AkitikOS/apps");
+    return;
+  }
+  File dir = SD.open(APPS_DIR);
+  if (!dir || !dir.isDirectory()) {
+    appsSetStatus("Apps dir missing");
+    return;
+  }
+  File f = dir.openNextFile();
+  while (f && appsCount < APPS_MAX_ENTRIES) {
+    if (!f.isDirectory()) {
+      String name = f.name();
+      if (name.endsWith(".bin")) {
+        name = baseNameFromPath(name);
+        appsEntries[appsCount++] = name;
+      }
+    }
+    f = dir.openNextFile();
+  }
+  dir.close();
+  appsSetStatus(appsCount ? "Enter install" : "No .bin files");
+}
+
+bool jsonReadStringAt(const String &body, const char *key, int &pos, String &out) {
+  String token = "\"" + String(key) + "\"";
+  int keyPos = body.indexOf(token, pos);
+  if (keyPos < 0) return false;
+  int colon = body.indexOf(':', keyPos + token.length());
+  if (colon < 0) return false;
+  int i = jsonSkipSpaces(body, colon + 1);
+  if (i >= (int)body.length() || body[i] != '"') return false;
+  ++i;
+  String val;
+  val.reserve(32);
+  while (i < (int)body.length()) {
+    char c = body[i++];
+    if (c == '\\') {
+      if (i >= (int)body.length()) break;
+      char esc = body[i++];
+      if (esc == 'n') val += '\n';
+      else if (esc == 'r') val += '\r';
+      else if (esc == 't') val += '\t';
+      else val += esc;
+      continue;
+    }
+    if (c == '"') {
+      out = val;
+      pos = i;
+      return true;
+    }
+    val += c;
+  }
+  return false;
+}
+
+bool appsFetchOnline(int page) {
+  appsResetList();
+  appsPage = max(1, page);
+  appsTotalPages = 1;
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  appsSetStatus("Loading...");
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.launcherhub.net/firmwares?category=cardputer&order_by=name&page=" + String(appsPage);
+  if (!http.begin(client, url)) {
+    appsSetStatus("Fetch failed");
+    return false;
+  }
+  http.setTimeout(8000);
+  int code = http.GET();
+  if (code != 200) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  String body = http.getString();
+  http.end();
+  if (!body.length()) {
+    appsSetStatus("Empty list");
+    return false;
+  }
+  int total = 0;
+  int pageSize = 0;
+  jsonReadInt(body, "total", total);
+  jsonReadInt(body, "page_size", pageSize);
+  if (pageSize > 0) {
+    appsTotalPages = max(1, (total + pageSize - 1) / pageSize);
+  }
+  int pos = body.indexOf("\"items\"");
+  if (pos < 0) {
+    appsSetStatus("Parse failed");
+    return false;
+  }
+  pos = body.indexOf('[', pos);
+  if (pos < 0) {
+    appsSetStatus("Parse failed");
+    return false;
+  }
+  while (appsCount < APPS_MAX_ENTRIES) {
+    String fid;
+    String name;
+    String author;
+    if (!jsonReadStringAt(body, "fid", pos, fid)) break;
+    if (!jsonReadStringAt(body, "name", pos, name)) break;
+    if (!jsonReadStringAt(body, "author", pos, author)) author = "";
+    if (!fid.length() || !name.length()) break;
+    String label = name;
+    if (author.length()) label += " - " + author;
+    appsEntries[appsCount] = label;
+    appsIds[appsCount] = fid;
+    ++appsCount;
+  }
+  appsSetStatus(appsCount ? "Enter install" : "No items");
+  return appsCount > 0;
+}
+
+bool appsFetchVersionFile(const String &fid, String &outFile) {
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  appsSetStatus("Fetching version...");
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  String url = "https://api.launcherhub.net/firmwares?fid=" + fid;
+  if (!http.begin(client, url)) {
+    appsSetStatus("Fetch failed");
+    return false;
+  }
+  http.setTimeout(8000);
+  int code = http.GET();
+  if (code != 200) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  String body = http.getString();
+  http.end();
+  if (!body.length()) {
+    appsSetStatus("Empty response");
+    return false;
+  }
+  int pos = body.indexOf("\"versions\"");
+  if (pos < 0) {
+    appsSetStatus("No versions");
+    return false;
+  }
+  String file;
+  if (!jsonReadStringAt(body, "file", pos, file)) {
+    appsSetStatus("No file");
+    return false;
+  }
+  outFile = file;
+  return true;
+}
+
+void appsDrawProgressBar() {
+  const Theme &th = THEMES[themeIndex];
+  int w = M5Cardputer.Display.width() - 20;
+  int x = 10;
+  int y = M5Cardputer.Display.height() / 2 + 10;
+  M5Cardputer.Display.fillRoundRect(x, y, w, 8, 4, th.bg2);
+  if (appsProgress >= 0) {
+    int fillW = (w * constrain(appsProgress, 0, 100)) / 100;
+    M5Cardputer.Display.fillRoundRect(x, y, fillW, 8, 4, th.accent);
+  } else {
+    M5Cardputer.Display.fillRoundRect(x, y, w / 4, 8, 4, th.accent);
+  }
+}
+
+bool appsInstallStream(Stream &stream, size_t totalSize, WiFiClient *client) {
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (!part) {
+    appsSetStatus("No OTA partition");
+    return false;
+  }
+  if (totalSize == 0 && !client) {
+    appsSetStatus("Size unknown");
+    return false;
+  }
+  size_t updateSize = totalSize > 0 ? totalSize : UPDATE_SIZE_UNKNOWN;
+  if (!Update.begin(updateSize, U_FLASH, -1, false, part)) {
+    appsSetStatus("Update begin failed");
+    return false;
+  }
+  uint8_t buf[1024];
+  size_t written = 0;
+  uint32_t lastDraw = 0;
+  while (totalSize == 0 ? (client && client->connected()) : (written < totalSize)) {
+    size_t avail = stream.available();
+    if (avail == 0) {
+      delay(1);
+      continue;
+    }
+    size_t toRead = min(avail, sizeof(buf));
+    int readBytes = stream.readBytes(buf, toRead);
+    if (readBytes <= 0) break;
+    size_t w = Update.write(buf, readBytes);
+    written += w;
+    if (w != (size_t)readBytes) {
+      Update.end();
+      appsSetStatus("Write failed");
+      return false;
+    }
+    if (totalSize > 0) {
+      appsProgress = (int)((written * 100) / totalSize);
+    } else {
+      appsProgress = -1;
+    }
+    if (millis() - lastDraw > 120) {
+      drawApps();
+      lastDraw = millis();
+    }
+  }
+  if (totalSize > 0 && written < totalSize) {
+    Update.end();
+    appsSetStatus("Download incomplete");
+    return false;
+  }
+  if (!Update.end()) {
+    appsSetStatus("Update end failed");
+    return false;
+  }
+  if (!Update.isFinished()) {
+    appsSetStatus("Update not finished");
+    return false;
+  }
+  appsProgress = 100;
+  appsSetStatus("Install done. Rebooting");
+  drawApps();
+  delay(600);
+  ESP.restart();
+  return true;
+}
+
+bool appsInstallFromUrl(const String &url) {
+  String clean = url;
+  clean.trim();
+  if (WiFi.status() != WL_CONNECTED) {
+    appsSetStatus("Wi-Fi not connected");
+    return false;
+  }
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, clean)) {
+    appsSetStatus("Bad URL");
+    return false;
+  }
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.useHTTP10(true);
+  http.setTimeout(8000);
+  appsProgress = 0;
+  appsSetStatus("Downloading...");
+  drawApps();
+  int code = http.GET();
+  if (code != 200) {
+    appsSetStatus("HTTP " + String(code));
+    http.end();
+    return false;
+  }
+  int len = http.getSize();
+  WiFiClient *stream = http.getStreamPtr();
+  bool ok = appsInstallStream(*stream, len > 0 ? (size_t)len : 0, stream);
+  http.end();
+  return ok;
+}
+
+bool appsInstallFromFile(const String &name) {
+  String path = String(APPS_DIR) + "/" + name;
+  File f = SD.open(path);
+  if (!f) {
+    appsSetStatus("Open failed");
+    return false;
+  }
+  appsProgress = 0;
+  appsSetStatus("Installing...");
+  drawApps();
+  bool ok = appsInstallStream(f, f.size(), nullptr);
+  f.close();
+  return ok;
 }
 
 // ----------------- Путь и файловые операции -----------------
@@ -1965,6 +2651,8 @@ void setup() {
   ssh_init();
 #endif
 
+  bootMaybeSwitchApp();
+
   consoleX = CONSOLE_MARGIN;
   consoleY = HEADER_HEIGHT + CONSOLE_MARGIN;
   consoleW = M5Cardputer.Display.width() - (CONSOLE_MARGIN * 2);
@@ -1981,7 +2669,8 @@ void setup() {
   }
 
   SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
-  if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+  sdReady = SD.begin(SD_SPI_CS_PIN, SPI, 25000000);
+  if (!sdReady) {
     printLine("SD: ошибка инициализации");
   } else {
     printLine("SD: OK");
@@ -1989,6 +2678,12 @@ void setup() {
     if (terminalFontLoaded) {
       terminalFont = console.getFont();
     }
+  }
+  if (sdReady) {
+    configLoad();
+    M5Cardputer.Display.setBrightness(map(brightnessPercent, 0, 100, 0, 255));
+    applyTheme();
+    wifiConnectSaved();
   }
 
   printLine("CardPC готов. help для списка команд.");
@@ -2113,7 +2808,7 @@ void drawHome() {
   int y = listTop;
   for (int i = 0; i < maxVisible; ++i) {
     int idx = homeScroll + i;
-    if (idx > 4) break;
+    if (idx > 5) break;
     if (idx == 0) {
       drawTile(8, y, cardW, cardH, "Terminal", "Command Line", homeIndex == 0);
     } else if (idx == 1) {
@@ -2125,8 +2820,11 @@ void drawHome() {
     } else if (idx == 3) {
       drawTile(8, y, cardW, cardH, "Files", "Manager & Edit", homeIndex == 3);
       drawTileBadge(8 + cardW - 6, y + 4, "NEW", th.accent, th);
+    } else if (idx == 4) {
+      drawTile(8, y, cardW, cardH, "Apps", "OTA & SD", homeIndex == 4);
+      drawTileBadge(8 + cardW - 6, y + 4, "OTA", th.accent, th);
     } else {
-      drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 4);
+      drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 5);
       drawTileBadge(8 + cardW - 6, y + 4, "AI", th.dim, th);
     }
     y += cardH + gap;
@@ -2197,9 +2895,125 @@ void drawTerminal() {
   drawShadowBox(consoleX - 2, consoleY - 2, consoleW + 4, consoleH + 4, 6, th.panel, th.shadow);
   M5Cardputer.Display.drawRoundRect(consoleX, consoleY, consoleW, consoleH, 4, th.dim);
   M5Cardputer.Display.drawFastHLine(consoleX + 2, consoleY + 2, consoleW - 4, th.accent);
-  console.pushSprite(consoleX, consoleY);
+  termRedraw();
   M5Cardputer.Display.setTextColor(th.fg, th.bg);
   renderInputLine();
+}
+
+void drawApps() {
+  const Theme &th = THEMES[themeIndex];
+  if (uiBgDirty) {
+    drawGradientBackground(th);
+  }
+  if (appsUiState == APPS_MENU) {
+    drawHeader("Apps");
+    int y = HEADER_HEIGHT + 10;
+    int lineH = 24;
+    int panelX = 6;
+    int panelW = M5Cardputer.Display.width() - 12;
+    for (int i = 0; i < 2; ++i) {
+      bool active = appsIndex == i;
+      uint16_t bg = active ? blend565(th.panel, th.accent, 160) : blend565(th.panel, th.accent, 96);
+      drawShadowBox(panelX, y + i * lineH, panelW, lineH - 2, 6, bg, th.shadow);
+      M5Cardputer.Display.drawRoundRect(panelX, y + i * lineH, panelW, lineH - 2, 6, th.dim);
+      if (active) {
+        drawGlowRing(panelX, y + i * lineH, panelW, lineH - 2, 6, th);
+        drawFocusRing(panelX + 2, y + i * lineH + 2, panelW - 4, lineH - 6, 5, th.accent);
+        drawActiveMarker(panelX + 6, y + i * lineH + 4, lineH - 10, th);
+      }
+      M5Cardputer.Display.setTextColor(th.fg, bg);
+      M5Cardputer.Display.setCursor(panelX + 12, y + i * lineH + 5);
+      if (i == 0) M5Cardputer.Display.print("Online");
+      else M5Cardputer.Display.print("SD Card");
+    }
+    drawFooter("Enter open  Esc back");
+    return;
+  }
+
+  if (appsUiState == APPS_ONLINE) {
+    String status = "Online " + String(appsPage) + "/" + String(appsTotalPages);
+    drawHeader("Apps", status);
+    int w = M5Cardputer.Display.width();
+    int h = M5Cardputer.Display.height();
+    int listTop = HEADER_HEIGHT + 6;
+    int listBottom = h - FOOTER_HEIGHT - 4;
+    int lineH = 16;
+    int maxLines = max(1, (listBottom - listTop) / lineH);
+    M5Cardputer.Display.fillRect(4, listTop - 2, w - 8, listBottom - listTop + 4, th.bg2);
+
+    if (appsListIndex < appsListScroll) appsListScroll = appsListIndex;
+    if (appsListIndex >= appsListScroll + maxLines) appsListScroll = appsListIndex - maxLines + 1;
+    int maxScroll = max(0, appsCount - maxLines);
+    if (appsListScroll > maxScroll) appsListScroll = maxScroll;
+
+    int textX = 18;
+    int textMaxW = w - textX - 12;
+    for (int i = 0; i < maxLines && (appsListScroll + i) < appsCount; ++i) {
+      int idx = appsListScroll + i;
+      int y = listTop + i * lineH;
+      bool active = idx == appsListIndex;
+      uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
+      M5Cardputer.Display.fillRoundRect(6, y, w - 12, lineH - 2, 4, bg);
+      if (active) {
+        drawGlowRing(6, y, w - 12, lineH - 2, 4, th);
+        drawActiveMarker(8, y + 2, lineH - 6, th);
+      }
+      M5Cardputer.Display.setTextColor(th.fg, bg);
+      M5Cardputer.Display.setCursor(textX, y + 3);
+      M5Cardputer.Display.print(clampTextToWidth(appsEntries[idx], textMaxW));
+    }
+    drawScrollBar(listTop, listBottom, appsCount, appsListScroll, maxLines, th);
+
+    if (appsCount == 0) {
+      drawEmptyState(w / 2, (listTop + listBottom) / 2, "No items", "Check Wi-Fi", th);
+    }
+    if (appsInstalling) {
+      appsDrawProgressBar();
+    }
+    String footer = appsStatus.length() ? appsStatus : "Enter install  L/R page  Esc back";
+    drawFooter(footer);
+    return;
+  }
+
+  drawHeader("Apps", "SD Card");
+  int w = M5Cardputer.Display.width();
+  int h = M5Cardputer.Display.height();
+  int listTop = HEADER_HEIGHT + 6;
+  int listBottom = h - FOOTER_HEIGHT - 4;
+  int lineH = 16;
+  int maxLines = max(1, (listBottom - listTop) / lineH);
+  M5Cardputer.Display.fillRect(4, listTop - 2, w - 8, listBottom - listTop + 4, th.bg2);
+
+  if (appsListIndex < appsListScroll) appsListScroll = appsListIndex;
+  if (appsListIndex >= appsListScroll + maxLines) appsListScroll = appsListIndex - maxLines + 1;
+  int maxScroll = max(0, appsCount - maxLines);
+  if (appsListScroll > maxScroll) appsListScroll = maxScroll;
+
+  int textX = 18;
+  int textMaxW = w - textX - 12;
+  for (int i = 0; i < maxLines && (appsListScroll + i) < appsCount; ++i) {
+    int idx = appsListScroll + i;
+    int y = listTop + i * lineH;
+    bool active = idx == appsListIndex;
+    uint16_t bg = active ? blend565(th.panel, th.accent, 140) : th.bg2;
+    M5Cardputer.Display.fillRoundRect(6, y, w - 12, lineH - 2, 4, bg);
+    if (active) {
+      drawGlowRing(6, y, w - 12, lineH - 2, 4, th);
+      drawActiveMarker(8, y + 2, lineH - 6, th);
+    }
+    M5Cardputer.Display.setTextColor(th.fg, bg);
+    M5Cardputer.Display.setCursor(textX, y + 3);
+    M5Cardputer.Display.print(clampTextToWidth(appsEntries[idx], textMaxW));
+  }
+  drawScrollBar(listTop, listBottom, appsCount, appsListScroll, maxLines, th);
+
+  if (appsCount == 0) {
+    drawEmptyState(w / 2, (listTop + listBottom) / 2, "No apps", "Use /AkitikOS/apps", th);
+  }
+  if (appsInstalling) {
+    appsDrawProgressBar();
+  }
+  drawFooter(appsStatus.length() ? appsStatus : "Enter install  R rescan  Esc back");
 }
 
 void drawWifiInputLine() {
@@ -2629,6 +3443,8 @@ void drawApp() {
     drawWifiPass();
   } else if (currentApp == APP_SSH) {
     drawSsh();
+  } else if (currentApp == APP_APPS) {
+    drawApps();
   } else if (currentApp == APP_AI) {
     drawAI();
   } else if (currentApp == APP_FILES) {
@@ -2681,6 +3497,9 @@ void wifiBeginConnect(int idx) {
   WiFi.mode(WIFI_STA);
   if (wifiIsOpen(idx)) {
     wifiTargetIndex = idx;
+    wifiPendingSave = true;
+    wifiPendingSsid = wifiList[idx].ssid;
+    wifiPendingPass = "";
     WiFi.begin(wifiList[idx].ssid);
     wifiConnecting = true;
   } else {
@@ -2697,6 +3516,9 @@ void wifiBeginConnect(int idx) {
 void wifiSubmitPassword() {
   if (wifiTargetIndex < 0 || wifiTargetIndex >= wifiCount) return;
   WiFi.mode(WIFI_STA);
+  wifiPendingSave = true;
+  wifiPendingSsid = wifiList[wifiTargetIndex].ssid;
+  wifiPendingPass = String(wifiPass);
   WiFi.begin(wifiList[wifiTargetIndex].ssid, wifiPass);
   wifiConnecting = true;
   wifiUiState = WIFI_LIST;
@@ -2710,6 +3532,7 @@ void wifiDisconnect() {
   wifiConnecting = false;
   wifiUiState = WIFI_LIST;
   wifiTargetIndex = -1;
+  wifiPendingSave = false;
   uiBgDirty = true;
   uiDirty = true;
 }
@@ -2718,6 +3541,14 @@ void wifiUpdateStatus() {
   if (!wifiConnecting) return;
   wl_status_t st = WiFi.status();
   if (st == WL_CONNECTED || st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL) {
+    if (st == WL_CONNECTED && wifiPendingSave) {
+      wifiSavedSsid = wifiPendingSsid;
+      wifiSavedPass = wifiPendingPass;
+      wifiPendingSave = false;
+      configMarkDirty();
+    } else if (st != WL_CONNECTED) {
+      wifiPendingSave = false;
+    }
     wifiConnecting = false;
     uiDirty = true;
   }
@@ -2747,6 +3578,7 @@ void updateHeaderIfNeeded() {
     (currentApp == APP_WIFI) ? "Wi-Fi" :
     (currentApp == APP_WIFI_PASS) ? "Wi-Fi Pass" :
     (currentApp == APP_SSH) ? "SSH" :
+    (currentApp == APP_APPS) ? "Apps" :
     (currentApp == APP_AI) ? "AI" :
     "Terminal";
   drawHeader(title);
@@ -2761,7 +3593,14 @@ void handleKeyboardTerminal() {
   bool btnA = M5Cardputer.BtnA.wasPressed();
   Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
   bool enterPressed = enterPressedOnce(status);
-  bool anyKey = !status.word.empty() || status.enter || status.del;
+  bool up = false;
+  bool down = false;
+  bool left = false;
+  bool right = false;
+  readNavArrows(status, up, down, left, right);
+  (void)left;
+  (void)right;
+  bool anyKey = !status.word.empty() || status.enter || status.del || up || down;
   if (!btnA && !anyKey) {
     keyRepeatAllowed(0, false);
     return;
@@ -2796,7 +3635,23 @@ void handleKeyboardTerminal() {
     backspaceInput();
   }
 
+  if (up && keyRepeatAllowed('U', true)) {
+    int maxScroll = termMaxScroll();
+    if (termScroll < maxScroll) {
+      termScroll = min(maxScroll, termScroll + accelStep(millis() - repeatStartMs));
+      termRedraw();
+      renderInputLine();
+    }
+  } else if (down && keyRepeatAllowed('D', true)) {
+    if (termScroll > 0) {
+      termScroll = max(0, termScroll - accelStep(millis() - repeatStartMs));
+      termRedraw();
+      renderInputLine();
+    }
+  }
+
   if (enterPressed || btnA) {
+    termScroll = 0;
     submitInputLine();
   } else {
     renderInputLine();
@@ -2827,7 +3682,7 @@ void handleKeyboardHome() {
   if (up && keyRepeatAllowed('U', true)) {
     homeIndex = max(0, homeIndex - 1);
   } else if (down && keyRepeatAllowed('D', true)) {
-    homeIndex = min(4, homeIndex + 1);
+    homeIndex = min(5, homeIndex + 1);
   }
 
   if (enterPressed || btnA) {
@@ -2835,6 +3690,7 @@ void handleKeyboardHome() {
     else if (homeIndex == 1) currentApp = APP_SETTINGS;
     else if (homeIndex == 2) currentApp = APP_NETWORK;
     else if (homeIndex == 3) currentApp = APP_FILES;
+    else if (homeIndex == 4) currentApp = APP_APPS;
     else currentApp = APP_AI;
   }
 
@@ -2850,6 +3706,11 @@ void handleKeyboardHome() {
       fileEditing = false;
       fileEditBuffer = "";
       fileScanDir();
+    } else if (currentApp == APP_APPS) {
+      appsUiState = APPS_MENU;
+      appsIndex = 0;
+      appsStatus = "";
+      appsInstalling = false;
     }
   }
   if (changed || enterPressed || btnA) {
@@ -2916,6 +3777,9 @@ void handleKeyboardSettings() {
   }
   if (oldTheme != themeIndex) {
     applyTheme();
+  }
+  if (oldBrightness != brightnessPercent || oldTheme != themeIndex || oldSound != soundEnabled) {
+    configMarkDirty();
   }
   if (changed || enterPressed || btnA) {
     pressFlashUntil = millis() + 120;
@@ -3029,6 +3893,9 @@ void handleKeyboardSsh() {
     else if (sshFieldIndex == 1 && sshUiUser.length()) sshUiUser.remove(sshUiUser.length() - 1);
     else if (sshFieldIndex == 2 && sshUiPort.length()) sshUiPort.remove(sshUiPort.length() - 1);
     else if (sshFieldIndex == 3 && sshUiPass.length()) sshUiPass.remove(sshUiPass.length() - 1);
+  }
+  if (!status.word.empty() || status.del) {
+    configMarkDirty();
   }
 
   if (escPressedOnce(status)) {
@@ -3273,6 +4140,134 @@ void handleKeyboardWifi() {
   uiDirty = true;
 }
 
+void handleKeyboardApps() {
+  bool btnA = M5Cardputer.BtnA.wasPressed();
+  Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
+  bool enterPressed = enterPressedOnce(status);
+  bool up = false;
+  bool down = false;
+  bool left = false;
+  bool right = false;
+  readNavArrows(status, up, down, left, right);
+  bool anyKey = !status.word.empty() || status.enter || status.del || up || down;
+  if (!btnA && !anyKey) {
+    keyRepeatAllowed(0, false);
+    return;
+  }
+  lastHeaderUpdateMs = 0;
+  if (appsInstalling) return;
+
+  if (appsUiState == APPS_MENU) {
+    if (up && keyRepeatAllowed('U', true)) {
+      appsIndex = (appsIndex + 1) % 2;
+    } else if (down && keyRepeatAllowed('D', true)) {
+      appsIndex = (appsIndex + 1) % 2;
+    }
+    if (escPressedOnce(status)) {
+      currentApp = APP_HOME;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (enterPressed || btnA) {
+      appsStatus = "";
+      appsProgress = -1;
+      if (appsIndex == 0) {
+        appsUiState = APPS_ONLINE;
+        appsFetchOnline(1);
+      } else {
+        appsUiState = APPS_SD;
+        appsScanSd();
+      }
+      uiDirty = true;
+      uiBgDirty = true;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (appsUiState == APPS_ONLINE) {
+    if (escPressedOnce(status)) {
+      appsUiState = APPS_MENU;
+      uiDirty = true;
+      uiBgDirty = true;
+      return;
+    }
+    if (!up && !down) {
+      keyRepeatAllowed(0, false);
+    }
+    if (appsCount > 0) {
+      if (up && keyRepeatAllowed('U', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        appsListIndex = max(0, appsListIndex - step);
+      } else if (down && keyRepeatAllowed('D', true)) {
+        int step = accelStep(millis() - repeatStartMs);
+        appsListIndex = min(appsCount - 1, appsListIndex + step);
+      }
+    }
+    if (left && keyRepeatAllowed('L', true)) {
+      if (appsPage > 1) {
+        appsFetchOnline(appsPage - 1);
+      }
+    } else if (right && keyRepeatAllowed('R', true)) {
+      if (appsPage < appsTotalPages) {
+        appsFetchOnline(appsPage + 1);
+      }
+    }
+    if (!status.word.empty()) {
+      char c = status.word[0];
+      if (c == 'r' || c == 'R') appsFetchOnline(appsPage);
+    }
+    if ((enterPressed || btnA) && appsCount > 0) {
+      appsInstalling = true;
+      uiDirty = true;
+      uiBgDirty = true;
+      String file;
+      bool ok = appsFetchVersionFile(appsIds[appsListIndex], file);
+      if (ok) {
+        String fileAddr = "https://api.launcherhub.net/download?fid=" + appsIds[appsListIndex] + "&file=" + file;
+        ok = appsInstallFromUrl(fileAddr);
+      }
+      appsInstalling = false;
+      if (!ok) uiDirty = true;
+    }
+    uiDirty = true;
+    return;
+  }
+
+  if (!up && !down) {
+    keyRepeatAllowed(0, false);
+  }
+  if (appsCount > 0) {
+    if (up && keyRepeatAllowed('U', true)) {
+      int step = accelStep(millis() - repeatStartMs);
+      appsListIndex = max(0, appsListIndex - step);
+    } else if (down && keyRepeatAllowed('D', true)) {
+      int step = accelStep(millis() - repeatStartMs);
+      appsListIndex = min(appsCount - 1, appsListIndex + step);
+    }
+  }
+  if (!status.word.empty()) {
+    char c = status.word[0];
+    if (c == 'r' || c == 'R') appsScanSd();
+  }
+  if (escPressedOnce(status)) {
+    appsUiState = APPS_MENU;
+    uiDirty = true;
+    uiBgDirty = true;
+    return;
+  }
+  if ((enterPressed || btnA) && appsCount > 0) {
+    appsInstalling = true;
+    uiDirty = true;
+    uiBgDirty = true;
+    bool ok = appsInstallFromFile(appsEntries[appsListIndex]);
+    appsInstalling = false;
+    if (!ok) uiDirty = true;
+  }
+  uiDirty = true;
+}
+
 void handleKeyboardAI() {
   bool btnA = M5Cardputer.BtnA.wasPressed();
   Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
@@ -3328,6 +4323,8 @@ void handleKeyboardAI() {
     if (enterPressed || btnA) {
       if (aiModelCount > 0) {
         aiModel = aiModels[aiModelIndex];
+        aiModelSaved = aiModel;
+        configMarkDirty();
         aiUiState = AI_CHAT;
         aiClearConsole();
         tftPrintLn("Model: " + aiModel);
@@ -3386,6 +4383,8 @@ void loop() {
     handleKeyboardSsh();
   } else if (currentApp == APP_FILES) {
     handleKeyboardFiles();
+  } else if (currentApp == APP_APPS) {
+    handleKeyboardApps();
   } else {
     handleKeyboardAI();
   }
@@ -3415,6 +4414,8 @@ void loop() {
   if (uiDirty) {
     drawApp();
   }
+
+  configPollSave();
 
   updateHeaderIfNeeded();
 
