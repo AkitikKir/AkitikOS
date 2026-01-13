@@ -1862,17 +1862,12 @@ void appsDrawProgressBar() {
 }
 
 bool appsInstallStream(Stream &stream, size_t totalSize, WiFiClient *client) {
-  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
-  if (!part) {
-    appsSetStatus("No OTA partition");
-    return false;
-  }
   if (totalSize == 0 && !client) {
     appsSetStatus("Size unknown");
     return false;
   }
   size_t updateSize = totalSize > 0 ? totalSize : UPDATE_SIZE_UNKNOWN;
-  if (!Update.begin(updateSize, U_FLASH, -1, false, part)) {
+  if (!Update.begin(updateSize, U_FLASH)) {
     appsSetStatus("Update begin failed");
     return false;
   }
