@@ -1888,6 +1888,11 @@ void appsDrawProgressBar() {
 }
 
 bool appsInstallStream(Stream &stream, size_t totalSize, WiFiClient *client) {
+  const esp_partition_t *part = esp_ota_get_next_update_partition(nullptr);
+  if (!part) {
+    appsSetStatus("No OTA partition");
+    return false;
+  }
   if (totalSize == 0 && !client) {
     appsSetStatus("Size unknown");
     return false;
@@ -1939,6 +1944,7 @@ bool appsInstallStream(Stream &stream, size_t totalSize, WiFiClient *client) {
     appsSetStatus("Update not finished");
     return false;
   }
+  esp_ota_set_boot_partition(part);
   appsProgress = 100;
   appsSetStatus("Install done. Rebooting");
   drawApps();
@@ -1954,6 +1960,28 @@ bool appsInstallFromUrl(const String &url) {
     appsSetStatus("Wi-Fi not connected");
     return false;
   }
+  WiFiClientSecure preflight;
+  preflight.setInsecure();
+  HTTPClient pre;
+  if (pre.begin(preflight, clean)) {
+    pre.addHeader("Range", "bytes=32768-32770");
+    pre.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+    pre.useHTTP10(true);
+    int code = pre.GET();
+    if (code == 206) {
+      WiFiClient *s = pre.getStreamPtr();
+      uint8_t buf[3] = {0};
+      if (s && s->available() >= 3) {
+        s->readBytes(buf, 3);
+        if (buf[0] == 0xAA && buf[1] == 0x50 && buf[2] == 0x01) {
+          appsSetStatus("Full image not supported");
+          pre.end();
+          return false;
+        }
+      }
+    }
+    pre.end();
+  }
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
@@ -1961,6 +1989,7 @@ bool appsInstallFromUrl(const String &url) {
     appsSetStatus("Bad URL");
     return false;
   }
+  http.addHeader("HWID", WiFi.macAddress());
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   http.useHTTP10(true);
   http.setTimeout(8000);
@@ -1986,6 +2015,16 @@ bool appsInstallFromFile(const String &name) {
   if (!f) {
     appsSetStatus("Open failed");
     return false;
+  }
+  uint8_t sig[3] = {0};
+  if (f.seek(0x8000)) {
+    f.read(sig, 3);
+    f.seek(0);
+    if (sig[0] == 0xAA && sig[1] == 0x50 && sig[2] == 0x01) {
+      appsSetStatus("Full image not supported");
+      f.close();
+      return false;
+    }
   }
   appsProgress = 0;
   appsSetStatus("Installing...");
