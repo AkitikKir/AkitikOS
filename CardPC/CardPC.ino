@@ -461,6 +461,39 @@ void drawScrollIndicators(int listTop, int listBottom, int total, int start, int
   }
 }
 
+void drawScrollBar(int listTop, int listBottom, int total, int start, int visible, const Theme &th) {
+  if (total <= visible) return;
+  int trackX = M5Cardputer.Display.width() - 5;
+  int trackY = listTop;
+  int trackH = max(6, listBottom - listTop);
+  M5Cardputer.Display.fillRoundRect(trackX, trackY, 3, trackH, 2, th.bg2);
+  float ratio = (float)visible / (float)total;
+  int barH = max(6, (int)(trackH * ratio));
+  int maxStart = max(1, total - visible);
+  int barY = trackY + (int)((trackH - barH) * ((float)start / (float)maxStart));
+  M5Cardputer.Display.fillRoundRect(trackX, barY, 3, barH, 2, th.dim);
+}
+
+int drawMiniIndicator(int x, int y, const String &label, uint16_t color, const Theme &th) {
+  int w = M5Cardputer.Display.textWidth(label) + 8;
+  M5Cardputer.Display.fillRoundRect(x, y, w, 10, 4, th.bg2);
+  M5Cardputer.Display.drawRoundRect(x, y, w, 10, 4, color);
+  M5Cardputer.Display.setTextColor(color, th.bg2);
+  M5Cardputer.Display.setCursor(x + 4, y + 2);
+  M5Cardputer.Display.print(label);
+  return w + 4;
+}
+
+void drawStorageBar(int x, int y, int w, const Theme &th) {
+  uint64_t sdTotal = SD.totalBytes();
+  uint64_t sdUsed = SD.usedBytes();
+  if (sdTotal == 0) return;
+  float used = (float)sdUsed / (float)sdTotal;
+  int fillW = (int)(w * used);
+  M5Cardputer.Display.fillRoundRect(x, y, w, 4, 2, th.bg2);
+  M5Cardputer.Display.fillRoundRect(x, y, fillW, 4, 2, th.accent);
+}
+
 void drawEmptyState(int centerX, int centerY, const String &title, const String &hint, const Theme &th) {
   uint16_t c = th.dim;
   int iconX = centerX - 10;
@@ -721,70 +754,37 @@ bool aiFetchModels() {
     return false;
   }
 
-  WiFiClient *stream = http.getStreamPtr();
-  const uint32_t deadline = millis() + 8000;
-  const char key[] = "\"id\"";
-  while (aiModelCount < 8 && millis() < deadline && (stream->connected() || stream->available())) {
-    int keyPos = 0;
-    bool found = false;
+  String body = http.getString();
+  http.end();
+  if (body.length() == 0) {
+    aiErrorUntil = millis() + 2000;
+    return false;
+  }
+
+  int pos = 0;
+  while (aiModelCount < 8) {
+    int idPos = body.indexOf("\"id\"", pos);
+    if (idPos < 0) break;
+    int colon = body.indexOf(':', idPos + 4);
+    if (colon < 0) break;
+    int quote = body.indexOf('"', colon + 1);
+    if (quote < 0) break;
+    int idx = quote + 1;
     String id;
-    while (millis() < deadline && (stream->connected() || stream->available())) {
-      if (!stream->available()) {
-        delay(2);
+    while (idx < (int)body.length()) {
+      char c = body[idx++];
+      if (c == '\\') {
+        if (idx < (int)body.length()) id += body[idx++];
         continue;
       }
-      char c = (char)stream->read();
-      if (!found) {
-        if (c == key[keyPos]) {
-          keyPos++;
-          if (keyPos == 4) {
-            found = true;
-            keyPos = 0;
-          }
-        } else {
-          keyPos = (c == key[0]) ? 1 : 0;
-        }
-        continue;
-      }
-      if (c != ':') {
-        continue;
-      }
-      // wait for opening quote of the value
-      while (millis() < deadline && (stream->connected() || stream->available())) {
-        if (!stream->available()) {
-          delay(2);
-          continue;
-        }
-        c = (char)stream->read();
-        if (c == '"') break;
-      }
-      // read value with basic escape handling
-      while (millis() < deadline && (stream->connected() || stream->available())) {
-        if (!stream->available()) {
-          delay(2);
-          continue;
-        }
-        c = (char)stream->read();
-        if (c == '\\') {
-          if (stream->available()) {
-            id += (char)stream->read();
-          }
-          continue;
-        }
-        if (c == '"') {
-          break;
-        }
-        if (id.length() < 96) id += c;
-      }
-      break;
+      if (c == '"') break;
+      if (id.length() < 96) id += c;
     }
     if (id.length()) {
       aiModels[aiModelCount++] = id;
-    } else {
-      break;
     }
+    pos = idx;
   }
-  http.end();
   if (aiModelCount == 0) {
     aiErrorUntil = millis() + 2000;
     return false;
@@ -1055,8 +1055,22 @@ void drawHeader(const String &title, const String &status) {
       M5Cardputer.Display.setTextColor(th.fg, pillBg);
       M5Cardputer.Display.setCursor(pillX + 6, 6);
       M5Cardputer.Display.print(status);
+      right = pillX - 6;
     }
   }
+
+  int leftX = 6 + M5Cardputer.Display.textWidth(title) + 6;
+  int y = 4;
+  uint16_t wifiColor = (WiFi.status() == WL_CONNECTED) ? th.accent : th.dim;
+  uint16_t modelColor = aiModelCount > 0 ? th.accent : th.dim;
+#if HAS_SSH
+  uint16_t sshColor = (sshState != SSH_IDLE) ? th.accent : th.dim;
+#else
+  uint16_t sshColor = th.dim;
+#endif
+  if (leftX + 24 < right) leftX += drawMiniIndicator(leftX, y, "Wi", wifiColor, th);
+  if (leftX + 20 < right) leftX += drawMiniIndicator(leftX, y, "M", modelColor, th);
+  if (leftX + 20 < right) leftX += drawMiniIndicator(leftX, y, "S", sshColor, th);
 }
 
 void drawHeader(const String &title) {
@@ -1142,6 +1156,17 @@ void drawIconFolder(int x, int y, uint16_t bg, const Theme &th) {
   M5Cardputer.Display.drawRoundRect(x + 2, y + 5, 18, 8, 2, frame);
   M5Cardputer.Display.fillRoundRect(x + 3, y + 6, 16, 6, 2, fill);
   M5Cardputer.Display.drawRoundRect(x + 4, y + 3, 8, 4, 2, frame);
+}
+
+void drawTileBadge(int x, int y, const String &text, uint16_t color, const Theme &th) {
+  if (!text.length()) return;
+  int w = M5Cardputer.Display.textWidth(text) + 8;
+  int bx = x - w;
+  int by = y;
+  M5Cardputer.Display.fillRoundRect(bx, by, w, 10, 4, color);
+  M5Cardputer.Display.setTextColor(th.panel, color);
+  M5Cardputer.Display.setCursor(bx + 4, by + 2);
+  M5Cardputer.Display.print(text);
 }
 
 void drawTile(int x, int y, int w, int h, const String &title, const String &subtitle, bool active) {
@@ -2089,11 +2114,21 @@ void drawHome() {
   for (int i = 0; i < maxVisible; ++i) {
     int idx = homeScroll + i;
     if (idx > 4) break;
-    if (idx == 0) drawTile(8, y, cardW, cardH, "Terminal", "Command Line", homeIndex == 0);
-    else if (idx == 1) drawTile(8, y, cardW, cardH, "Settings", "Display & Sound", homeIndex == 1);
-    else if (idx == 2) drawTile(8, y, cardW, cardH, "Network", "Wi-Fi & SSH", homeIndex == 2);
-    else if (idx == 3) drawTile(8, y, cardW, cardH, "Files", "Manager & Edit", homeIndex == 3);
-    else drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 4);
+    if (idx == 0) {
+      drawTile(8, y, cardW, cardH, "Terminal", "Command Line", homeIndex == 0);
+    } else if (idx == 1) {
+      drawTile(8, y, cardW, cardH, "Settings", "Display & Sound", homeIndex == 1);
+    } else if (idx == 2) {
+      drawTile(8, y, cardW, cardH, "Network", "Wi-Fi & SSH", homeIndex == 2);
+      uint16_t badge = WiFi.status() == WL_CONNECTED ? th.accent : th.dim;
+      drawTileBadge(8 + cardW - 6, y + 4, WiFi.status() == WL_CONNECTED ? "ON" : "OFF", badge, th);
+    } else if (idx == 3) {
+      drawTile(8, y, cardW, cardH, "Files", "Manager & Edit", homeIndex == 3);
+      drawTileBadge(8 + cardW - 6, y + 4, "NEW", th.accent, th);
+    } else {
+      drawTile(8, y, cardW, cardH, "AI", "Soon", homeIndex == 4);
+      drawTileBadge(8 + cardW - 6, y + 4, "AI", th.dim, th);
+    }
     y += cardH + gap;
   }
 
@@ -2290,7 +2325,7 @@ void drawWifi() {
     M5Cardputer.Display.print(clampTextToWidth(wifiList[idx].ssid, textMaxW));
     drawWifiSignalBars(M5Cardputer.Display.width() - 20, y + 2, wifiList[idx].rssi, th, active);
   }
-  drawScrollIndicators(listTop, listBottom, wifiCount, start, maxLines, th);
+  drawScrollBar(listTop, listBottom, wifiCount, start, maxLines, th);
   if (wifiCount == 0 && !wifiScanning) {
     drawEmptyState(M5Cardputer.Display.width() / 2, (listTop + listBottom) / 2, "No networks", "R to scan", th);
   }
@@ -2451,7 +2486,7 @@ void drawAI() {
       M5Cardputer.Display.setCursor(textX, y + 3);
       M5Cardputer.Display.print(clampTextToWidth(aiModels[idx], textMaxW));
     }
-    drawScrollIndicators(listTop, listBottom, aiModelCount, start, maxLines, th);
+    drawScrollBar(listTop, listBottom, aiModelCount, start, maxLines, th);
 
     if (aiModelCount == 0) {
       drawEmptyState(M5Cardputer.Display.width() / 2, (listTop + listBottom) / 2, "No models", "R to refresh", th);
@@ -2486,8 +2521,9 @@ void drawFiles() {
     M5Cardputer.Display.setTextColor(th.dim, th.bg2);
     M5Cardputer.Display.setCursor(10, pathY + 2);
     M5Cardputer.Display.print(clampTextToWidth(fileCwd, w - 24));
+    drawStorageBar(10, pathY + 11, w - 20, th);
 
-    int listTop = pathY + 16;
+    int listTop = pathY + 20;
     int listBottom = h - FOOTER_HEIGHT - 4;
     int lineH = 16;
     int maxLines = max(1, (listBottom - listTop) / lineH);
@@ -2516,7 +2552,7 @@ void drawFiles() {
       M5Cardputer.Display.setCursor(textX, y + 3);
       M5Cardputer.Display.print(clampTextToWidth(name, textMaxW));
     }
-    drawScrollIndicators(listTop, listBottom, fileCount, fileScroll, maxLines, th);
+    drawScrollBar(listTop, listBottom, fileCount, fileScroll, maxLines, th);
 
     if (fileCount == 0) {
       if (SD.totalBytes() == 0) {
@@ -2530,7 +2566,8 @@ void drawFiles() {
     return;
   }
 
-  String status = fileDirty ? "modified" : "saved";
+  String status = String(fileLineIndex + 1) + "/" + String(fileLineCount) + " " +
+    String(fileDirty ? "modified" : "saved");
   drawHeader("Edit", status);
 
   int w = M5Cardputer.Display.width();
@@ -2565,7 +2602,7 @@ void drawFiles() {
     M5Cardputer.Display.setCursor(textX, y + 2);
     M5Cardputer.Display.print(clampTextToWidth(line, textMaxW));
   }
-  drawScrollIndicators(listTop, listBottom, fileLineCount, fileLineScroll, maxLines, th);
+  drawScrollBar(listTop, listBottom, fileLineCount, fileLineScroll, maxLines, th);
 
   int inputY = h - FOOTER_HEIGHT - INPUT_AREA_HEIGHT;
   drawFileEditInputLine(inputY);
