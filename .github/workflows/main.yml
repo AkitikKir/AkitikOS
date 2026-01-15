@@ -40,7 +40,8 @@ jobs:
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
-          arduino-cli lib install "AudioFileSourceSD"
+          # ESP8266Audio provides the AudioFileSourceSD/ID3 classes and MP3 decoder
+          arduino-cli lib install "ESP8266Audio"
           # Add LibSSH-ESP32 library
           arduino-cli lib install "LibSSH-ESP32" || echo "LibSSH-ESP32 not available; SSH features will be disabled"
 
@@ -77,14 +78,14 @@ jobs:
           echo "=== COMPILE WITH HUGE_APP PARTITION ==="
           arduino-cli compile \
             --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=huge_app \
-            --output-dir ./build ./CardPC && echo "✅ Option 1 SUCCESS" || echo "❌ Option 1 failed"
+            --output-dir ./build ./CardPC && echo "âœ… Option 1 SUCCESS" || echo "âŒ Option 1 failed"
           
           if ls ./build/*.bin 1> /dev/null 2>&1; then
-            echo "✅ Compilation successful!"
+            echo "âœ… Compilation successful!"
             echo "Generated files:"
             ls -la ./build/
           else
-            echo "❌ Compilation failed"
+            echo "âŒ Compilation failed"
             exit 1
           fi
 
