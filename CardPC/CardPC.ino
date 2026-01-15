@@ -29,6 +29,134 @@
 #endif
 #include <M5Unified.h> // Добавьте это явно, если его нет
 
+// --- Дополнительные библиотеки для воспроизведения MP3 с microSD ---
+// Для декодирования MP3 используется библиотека ESP8266Audio. Она
+// предоставляет классы AudioFileSourceSD для чтения файлов, AudioFileSourceID3
+// для обработки ID3‑заголовков, AudioGeneratorMP3 для декодирования MP3 и
+// AudioOutput (реализованный ниже) для вывода данных на динамик. Эти
+// заголовки должны быть доступны в окружении Arduino. См. пример
+// MP3_with_ESP8266Audio в репозитории M5Unified, где приводится аналогичная
+// реализацияhttps://raw.githubusercontent.com/m5stack/M5Unified/master/examples/Advanced/MP3_with_ESP8266Audio/MP3_with_ESP8266Audio.ino#:~:text=0x330000u%29%3B%20prev_x%5Bi%5D%20%3D%20x%3B%20,display.
+#include <AudioFileSourceSD.h>
+#include <AudioFileSourceID3.h>
+#include <AudioGeneratorMP3.h>
+#include <AudioOutput.h>
+
+// --- Реализация вывода MP3 на динамик M5Cardputer ---
+// Класс AudioOutputM5Speaker буферизует стереосемплы и передаёт их
+// объекту M5Cardputer.Speaker методом playRaw(). Он основан на примере
+// M5Unified/examples/Advanced/MP3_with_ESP8266Audio, но упрощён: здесь
+// используется тройной буфер для вывода и фиксированная частота дискретизации.
+class AudioOutputM5Speaker : public AudioOutput {
+public:
+  AudioOutputM5Speaker(m5::Speaker_Class *m5sound, uint8_t virtual_sound_channel = 0)
+    : _m5sound(m5sound), _virtual_ch(virtual_sound_channel) {}
+  virtual ~AudioOutputM5Speaker(void) {}
+  virtual bool begin(void) override { return true; }
+  // Получает один стереосемпл (два 16‑битных значения). Буферизуем
+  // семплы и периодически передаём их динамику. Возвращаем true, если приём
+  // прошёл успешно, false — если пришлось сбросить буфер.
+  virtual bool ConsumeSample(int16_t sample[2]) override {
+    if (_tri_buffer_index < tri_buf_size) {
+      _tri_buffer[_tri_index][_tri_buffer_index    ] = sample[0];
+      _tri_buffer[_tri_index][_tri_buffer_index + 1] = sample[1];
+      _tri_buffer_index += 2;
+      return true;
+    }
+    flush();
+    return false;
+  }
+  // Передаёт накопленные семплы в динамик и очищает буфер.
+  virtual void flush(void) override {
+    if (_tri_buffer_index) {
+      // Параметры: буфер данных, количество сэмплов, частота,
+      // true — стерео, 1 — повторить один раз, виртуальный канал.
+      _m5sound->playRaw(_tri_buffer[_tri_index], _tri_buffer_index, hertz, true, 1, _virtual_ch);
+      _tri_index = _tri_index < 2 ? _tri_index + 1 : 0;
+      _tri_buffer_index = 0;
+    }
+  }
+  // Остановка воспроизведения: сбрасываем буфер и останавливаем звук.
+  virtual bool stop(void) override {
+    flush();
+    _m5sound->stop(_virtual_ch);
+    return true;
+  }
+protected:
+  m5::Speaker_Class *_m5sound;
+  uint8_t _virtual_ch;
+  static constexpr size_t tri_buf_size = 1536;
+  int16_t _tri_buffer[3][tri_buf_size];
+  size_t _tri_buffer_index = 0;
+  size_t _tri_index = 0;
+  // Частота дискретизации (Гц). MP3‑файлы обычно записаны с
+  // 44,1 кГц; при необходимости библиотека AudioGeneratorMP3 выполнит
+  // ресэмплинг. Это значение можно изменить для экспериментов.
+  static constexpr uint32_t hertz = 44100;
+};
+
+// Глобальные объекты для воспроизведения MP3. Источники создаются
+// динамически, поэтому хранится только экземпляр AudioFileSourceSD и
+// AudioGeneratorMP3. audioId3 будет выделяться в функции playMP3File().
+static AudioFileSourceSD audioFile;
+static AudioFileSourceID3 *audioId3 = nullptr;
+static AudioGeneratorMP3 audioGen;
+// Используем виртуальный канал 0. Если в проекте используются другие
+// каналы, этот номер можно изменить.
+static AudioOutputM5Speaker audioOutput(&M5Cardputer.Speaker, 0);
+
+// Воспроизводит MP3‑файл с карты microSD, блокируя выполнение до
+// окончания воспроизведения. Перед началом воспроизведения отключает
+// текущий звук (если звучит тон) и по окончании останавливает вывод
+// аудио. Если файл не найден, функция быстро завершится. Использует
+// классы ESP8266Audio, как описано в примере MP3_with_ESP8266Audiohttps://raw.githubusercontent.com/m5stack/M5Unified/master/examples/Advanced/MP3_with_ESP8266Audio/MP3_with_ESP8266Audio.ino#:~:text=0x330000u%29%3B%20prev_x%5Bi%5D%20%3D%20x%3B%20,display.
+void playMP3File(const char *filename) {
+  // Попробуем открыть файл. Имя файла должно начинаться с '/'
+  if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+    // microSD не инициализирована — пропускаем воспроизведение
+    return;
+  }
+  if (!SD.exists(filename)) {
+    // Файл отсутствует
+    return;
+  }
+  // Остановим любой текущий тон на динамике
+  M5Cardputer.Speaker.end();
+  // Закрываем предыдущий источник, если он ещё существует
+  if (audioId3 != nullptr) {
+    audioGen.stop();
+    audioOutput.stop();
+    audioId3->close();
+    audioFile.close();
+    delete audioId3;
+    audioId3 = nullptr;
+  }
+  audioFile.open(filename);
+  audioId3 = new AudioFileSourceID3(&audioFile);
+  audioId3->open(filename);
+  audioGen.begin(audioId3, &audioOutput);
+  // Пока идёт воспроизведение, вызывать loop() декодера. Это
+  // блокирующий цикл, но длительность звука невелика, поэтому
+  // приемлема. Внутри цикла обновляем M5Cardputer для обработки
+  // событий клавиатуры/экрана и вызова обновлений.
+  while (audioGen.isRunning()) {
+    if (!audioGen.loop()) {
+      audioGen.stop();
+      break;
+    }
+    // Обновление состояния устройства (клавиатура, дисплей, питание)
+    M5Cardputer.update();
+    // Небольшая пауза позволяет системе обслуживать другие задачи
+    delay(1);
+  }
+  // Остановить вывод и освободить ресурсы
+  audioOutput.stop();
+  audioId3->close();
+  audioFile.close();
+  delete audioId3;
+  audioId3 = nullptr;
+}
+
 // Опционально: ESP32Time (если доступна в окружении)
 // #include <ESP32Time.h>
 
@@ -3527,11 +3655,20 @@ void cmdBomb() {
   // Если bomb выключен — активируем его
   if (!bombActive) {
     bombActive = true;
-    bombStartTime = millis();
     bombContinuous = false;
     bombLastBeepTime = 0;
-    // Начальный интервал между писками (в миллисекундах)
-    bombCurrentInterval = 200.0f;
+    // Перед запуском последовательности воспроизвести аудиофайл
+    // «planted», если звук разрешён. Файл должен находиться на карте
+    // microSD в каталоге /AkitikOS. Воспроизведение блокирует выполнение
+    // на время звучания и автоматически останавливает любой текущий тон.
+    if (soundEnabled) {
+      playMP3File("/AkitikOS/planted.mp3");
+    }
+    // Устанавливаем начальные параметры режима bomb
+    bombStartTime = millis();
+    // Начальный интервал между писками. Интервалы будут уменьшаться от
+    // 2000 мс до 200 мс в течение 200 секунд.
+    bombCurrentInterval = 2000.0f;
     printLine(String("bomb: started"));
     return;
   }
@@ -4858,12 +4995,22 @@ void bombUpdate() {
     uint32_t elapsed = now - bombStartTime;
     // По истечении 200 секунд переключаемся на постоянный тон
     if (elapsed >= 200000UL) {
+      // Переход в режим постоянного писка. Перед этим проигрываем
+      // завершающий звук «boom». Для корректного воспроизведения
+      // остановим текущий тон, затем запустим MP3. После завершения
+      // проигрывания функция bombUpdate() перейдёт в ветку
+      // bombContinuous и будет поддерживать непрерывный тон.
       bombContinuous = true;
-      // Включаем постоянный звук, если звук разрешён
       if (soundEnabled) {
-        // Не задаём продолжительность — тон будет звучать до остановки
-        M5Cardputer.Speaker.tone(4000);
+        // Остановить текущий тон
+        M5Cardputer.Speaker.end();
+        // Воспроизвести файл /AkitikOS/boom.mp3
+        playMP3File("/AkitikOS/boom.mp3");
       }
+      // После проигрывания функция вернётся; на следующем вызове
+      // bombUpdate() будет выполнена ветка bombContinuous, которая
+      // включит постоянный тон. Возвращаемся, чтобы не начать тон
+      // немедленно в этой итерации.
       return;
     }
     // Проверяем, пора ли воспроизвести следующий писк
