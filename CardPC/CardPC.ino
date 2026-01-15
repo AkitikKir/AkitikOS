@@ -1,4 +1,5 @@
 
+
 /*
   AkitikOS
 */
@@ -38,6 +39,16 @@
 // MP3_with_ESP8266Audio в репозитории M5Unified, где приводится аналогичная
 // реализацияhttps://raw.githubusercontent.com/m5stack/M5Unified/master/examples/Advanced/MP3_with_ESP8266Audio/MP3_with_ESP8266Audio.ino#:~:text=0x330000u%29%3B%20prev_x%5Bi%5D%20%3D%20x%3B%20,display.
 #include <AudioFileSourceSD.h>
+
+// ----------------------------------------------------------------------------
+// Forward declarations for pin constants.  These pins are defined later in the
+// file but referenced from functions that appear above their definitions.
+// In C++ a variable must be declared before it is used; providing these
+// declarations allows the compiler to see the names up front.
+extern const int SD_SPI_SCK_PIN;
+extern const int SD_SPI_MISO_PIN;
+extern const int SD_SPI_MOSI_PIN;
+extern const int SD_SPI_CS_PIN;
 #include <AudioFileSourceID3.h>
 #include <AudioGeneratorMP3.h>
 #include <AudioOutput.h>
@@ -167,15 +178,20 @@ void playMP3File(const char *filename) {
 // #include <IRutils.h>
 
 // ----------------- Аппаратные пины -----------------
-static const int PIN_SPK = 1;       // DAC1
-static const int PIN_IR_TX = 47;
-static const int PIN_IR_RX = 17;
+//
+// Pin assignments for the on-board peripherals.  These are plain
+// `const` variables rather than `static const` so they have external linkage.
+// They correspond to the DAC speaker output, infrared transmitter/receiver
+// and the SPI signals for the microSD card on the M5Cardputer.
+const int PIN_SPK = 1;       // DAC1
+const int PIN_IR_TX = 47;
+const int PIN_IR_RX = 17;
 
 // microSD (M5Cardputer: SCK=40, MISO=39, MOSI=14, CS=12)
-static const int SD_SPI_SCK_PIN = 40;
-static const int SD_SPI_MISO_PIN = 39;
-static const int SD_SPI_MOSI_PIN = 14;
-static const int SD_SPI_CS_PIN = 12;
+const int SD_SPI_SCK_PIN = 40;
+const int SD_SPI_MISO_PIN = 39;
+const int SD_SPI_MOSI_PIN = 14;
+const int SD_SPI_CS_PIN  = 12;
 
 // Store partition definition tables in flash memory to save SRAM. The PROGMEM
 // attribute places these constant arrays in program storage (flash). See
@@ -492,6 +508,28 @@ static const Theme THEMES[] = {
   {0x0012, 0x0A33, 0xFFFF, 0x07FF, 0x18E3, 0xFFE0, 0x0000, 0x7BEF},
   {0x0000, 0x2104, 0xE71C, 0x07E0, 0x39E7, 0xFFE0, 0x0000, 0x7BEF},
 };
+
+// ---------------------------------------------------------------------------
+// Forward declarations for UI drawing helpers.
+//
+// Several higher-level UI routines (such as drawBootScreen) are defined
+// earlier in the file and call helper functions that are implemented later.
+// Without prototypes the compiler would assume an implicit declaration and
+// attempt to coerce parameters to incorrect types.  Declaring the
+// prototypes here ensures type checking and avoids "invalid initialization
+// of reference" errors.
+void drawGradientBackground(const Theme &th);
+void drawShadowBox(int x, int y, int w, int h, int r,
+                   uint16_t fill, uint16_t shadow);
+void drawFocusRing(int x, int y, int w, int h, int r,
+                   uint16_t color);
+void drawGlowRing(int x, int y, int w, int h, int r,
+                  const Theme &th);
+void drawBatteryIcon(int x, int y, int level, bool charging,
+                     const Theme &th);
+void drawWifiIcon(int x, int y, bool on, const Theme &th);
+void drawWifiSignalBars(int x, int y, int rssi,
+                        const Theme &th, bool active);
 
 //
 // Helper function to initialize the SD card.
