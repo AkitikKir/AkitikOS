@@ -40,6 +40,7 @@ jobs:
           arduino-cli lib install "M5Cardputer"
           arduino-cli lib install "M5Unified"
           arduino-cli lib install "M5GFX"
+          arduino-cli lib install "AudioFileSourceSD"
           # Add LibSSH-ESP32 library
           arduino-cli lib install "LibSSH-ESP32" || echo "LibSSH-ESP32 not available; SSH features will be disabled"
 
