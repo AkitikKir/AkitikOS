@@ -1,3 +1,4 @@
+
 name: Compile M5Cardputer Sketch
 
 on: [push, pull_request]
@@ -78,14 +79,14 @@ jobs:
           echo "=== COMPILE WITH HUGE_APP PARTITION ==="
           arduino-cli compile \
             --fqbn m5stack:esp32:m5stack_cardputer:PartitionScheme=huge_app \
-            --output-dir ./build ./CardPC && echo "âœ… Option 1 SUCCESS" || echo "âŒ Option 1 failed"
+            --output-dir ./build ./CardPC && echo "✅ Option 1 SUCCESS" || echo "❌ Option 1 failed"
           
           if ls ./build/*.bin 1> /dev/null 2>&1; then
-            echo "âœ… Compilation successful!"
+            echo "✅ Compilation successful!"
             echo "Generated files:"
             ls -la ./build/
           else
-            echo "âŒ Compilation failed"
+            echo "❌ Compilation failed"
             exit 1
           fi
 
