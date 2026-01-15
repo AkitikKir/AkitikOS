@@ -174,6 +174,27 @@ bool aiLoading = false;
 enum AiUiState { AI_MODELS, AI_CHAT };
 AiUiState aiUiState = AI_MODELS;
 
+// ----------------- bomb (пищалка) состояние -----------------
+// Флаг указывает, активирована ли команда bomb. Когда true, функция
+// bombUpdate() будет вызывать тон с постепенно уменьшающимися интервалами
+// между писками в течение 200 секунд, а затем включать постоянный писк до
+// повторного вызова команды bomb. Все времена измеряются в миллисекундах.
+bool bombActive = false;
+// Время начала последовательности bomb (значение millis()). Используется для
+// вычисления прошедшего времени и выбора интервала между писками.
+uint32_t bombStartTime = 0;
+// Флаг, указывающий, что режим постоянного писка уже включён. После
+// перехода в этот режим bombUpdate() больше не изменяет интервалы, но
+// оставляет спикер включённым.
+bool bombContinuous = false;
+// Время последнего писка (millis()). Используется для определения, когда
+// пора запустить следующий писк.
+uint32_t bombLastBeepTime = 0;
+// Текущий интервал (задержка) между писками, который плавно увеличивается
+// от начального значения к конечному в течение 200 секунд. Это
+// значение пересчитывается после каждого писка.
+float bombCurrentInterval = 0.0f;
+
 enum FileUiState { FILE_LIST, FILE_EDIT };
 FileUiState fileUiState = FILE_LIST;
 static const int FILE_MAX_ENTRIES = 32;
@@ -3058,7 +3079,7 @@ void cmdHelp() {
   printLine("connect <ssid> <pass>, ping <host>, ip, mac");
   printLine("ssh <user@host>");
   printLine("date, uptime, heap, mem, battery, sysinfo");
-  printLine("beep, sound <on|off|toggle>, brightness 0-100, theme <n|next|prev>");
+  printLine("beep, bomb, sound <on|off|toggle>, brightness 0-100, theme <n|next|prev>");
   printLine("ir-send <HEX>, ir-learn, df, rmdir <dir>");
   printLine("sleep, reboot, shutdown, exit");
 }
@@ -3497,6 +3518,35 @@ void cmdBeep() {
   M5Cardputer.Speaker.tone(4000, 80);
 }
 
+// Команда bomb запускает или останавливает последовательность писка.
+// При первом вызове активируется режим bomb: пищалка начинает издавать
+// короткие писки с интервалом, который постепенно увеличивается в течение
+// 200 секунд. После 200 секунд включается постоянный писк. При
+// повторном вызове режима bomb писки останавливаются.
+void cmdBomb() {
+  // Если bomb выключен — активируем его
+  if (!bombActive) {
+    bombActive = true;
+    bombStartTime = millis();
+    bombContinuous = false;
+    bombLastBeepTime = 0;
+    // Начальный интервал между писками (в миллисекундах)
+    bombCurrentInterval = 200.0f;
+    printLine(String("bomb: started"));
+    return;
+  }
+  // Если bomb уже активен — остановим его
+  bombActive = false;
+  bombContinuous = false;
+  // Попробуем остановить звук. В библиотеке M5Cardputer это может
+  // выполняться методом end() либо mute(), здесь используем end() если
+  // доступно. Если нет, звук прекратится сам после завершения текущего тона.
+  // Обработчик перестанет инициировать новые писки, поэтому звук
+  // остановится.
+  M5Cardputer.Speaker.end();
+  printLine(String("bomb: stopped"));
+}
+
 void cmdSound(const String &arg) {
   if (arg == "on") soundEnabled = true;
   else if (arg == "off") soundEnabled = false;
@@ -3656,6 +3706,7 @@ void handleCommand(const String &line) {
   if (cmd == "ip") return cmdIp();
   if (cmd == "mac") return cmdMac();
   if (cmd == "beep") return cmdBeep();
+  if (cmd == "bomb") return cmdBomb();
   if (cmd == "sound") return cmdSound("");
   if (cmd.startsWith("sound ")) return cmdSound(cmd.substring(6));
   if (cmd.startsWith("brightness ")) return cmdBrightness(cmd.substring(11).toInt());
@@ -4794,6 +4845,52 @@ void updateHeaderIfNeeded() {
   lastTimeLabel[sizeof(lastTimeLabel) - 1] = '\0';
 }
 
+// Обновление пищалки в режиме bomb. Эта функция вызывается из loop() каждый
+// цикл. Она управляет тональной последовательностью: в течение первых
+// 200 секунд интервалы между короткими писками постепенно уменьшаются,
+// затем включается непрерывный писк. Если bomb не активна, функция
+// немедленно возвращает управление.
+void bombUpdate() {
+  if (!bombActive) return;
+  uint32_t now = millis();
+  // Если ещё не перешли в режим постоянного писка
+  if (!bombContinuous) {
+    uint32_t elapsed = now - bombStartTime;
+    // По истечении 200 секунд переключаемся на постоянный тон
+    if (elapsed >= 200000UL) {
+      bombContinuous = true;
+      // Включаем постоянный звук, если звук разрешён
+      if (soundEnabled) {
+        // Не задаём продолжительность — тон будет звучать до остановки
+        M5Cardputer.Speaker.tone(4000);
+      }
+      return;
+    }
+    // Проверяем, пора ли воспроизвести следующий писк
+    if (bombLastBeepTime == 0 || now - bombLastBeepTime >= (uint32_t)bombCurrentInterval) {
+      if (soundEnabled) {
+        // Короткий писк 80 мс
+        M5Cardputer.Speaker.tone(4000, 80);
+      }
+      bombLastBeepTime = now;
+      // Пересчитываем интервал: линейная интерполяция от длинного к короткому.
+      // В начале пауза между писками максимальна (2000 мс), затем
+      // постепенно уменьшается до 200 мс по мере приближения к 200 секундам.
+      float t = (float)elapsed / 200000.0f;
+      float startInterval = 2000.0f;
+      float endInterval = 200.0f;
+      bombCurrentInterval = startInterval + (endInterval - startInterval) * t;
+    }
+  } else {
+    // bombContinuous == true: гарантируем, что тон включён (если звук разрешён)
+    // В случае если пользователь отключил звук, не воспроизводим тон
+    if (soundEnabled) {
+      // tone() без параметра продолжительности перезапустит постоянный тон
+      M5Cardputer.Speaker.tone(4000);
+    }
+  }
+}
+
 void handleKeyboardTerminal() {
   bool btnA = M5Cardputer.BtnA.wasPressed();
   Keyboard_Class::KeysState status = M5Cardputer.Keyboard.keysState();
@@ -5818,4 +5915,8 @@ void loop() {
       renderInputLine();
     }
   }
+
+  // Обновляем пищалку bomb (если активирована). Вызовем в конце цикла
+  // чтобы не мешать обработке клавиатуры и интерфейса.
+  bombUpdate();
 }
