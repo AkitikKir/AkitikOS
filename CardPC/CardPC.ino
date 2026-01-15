@@ -2402,7 +2402,25 @@ bool appsPerformAppUpdate(Stream &updateSource, size_t updateSize) {
     part = ota0 ? ota0 : (ota1 ? ota1 : test);
   }
   if (running && part && running->address == part->address) {
-    appsSetStatus("No alternate app partition");
+    // If there is no alternative OTA app partition available (i.e. only one
+    // application slot is defined in the current partition scheme) then
+    // performing an OTA update is not possible. According to the ESP-IDF
+    // documentation, safe OTA updates require at least two application slots
+    // (ota_0 and ota_1)https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/ota.html#:~:text=chip%20will%20remain%20operational%20and,following%20partitions%20support%20this%20mode.  To work around this
+    // scenario we attempt to apply the default partition scheme for the
+    // device's flash size, which defines two OTA app slots, and then reboot.
+    appsSetStatus("No alternate app partition. Applying default scheme...");
+    drawApps();
+    bool changed = appsChangePartitionDefault();
+    if (changed) {
+      appsSetStatus("Partition scheme applied. Rebooting");
+      drawApps();
+      delay(500);
+      ESP.restart();
+    } else {
+      appsSetStatus("Failed to apply partition scheme");
+      drawApps();
+    }
     return false;
   }
   if (!part) {
